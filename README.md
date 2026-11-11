@@ -2,6 +2,30 @@
 
 A Process Hacker–style process explorer for macOS that surfaces the attribution data macOS itself uses: responsible processes, coalitions, LaunchServices state, code signatures, launchd jobs and Background Task Management records.
 
+## Screenshots
+
+Process tree with the inspector on `launchd`, showing `vmmap --summary` parsed into footprint tiles, memory-portion bars and a per-region chart:
+
+![Memory Map](docs/screenshots/memory.png)
+
+`sample` as a collapsible call tree: busy threads in orange, waits in grey, libraries colour-coded:
+
+![Sample](docs/screenshots/sample.png)
+
+`lsof` as a typed, filterable table (here filtered to Unix and TCP sockets):
+
+![Files & Sockets](docs/screenshots/files.png)
+
+Entitlements grouped into Apple-private, sandbox/security and other:
+
+![Entitlements](docs/screenshots/entitlements.png)
+
+`lsappinfo` and `launchctl print` rendered as cards:
+
+![launchd / LaunchServices](docs/screenshots/launchd.png)
+
+Every pane has a **Visual / Raw** switch to see the tool's original text.
+
 ## Build & run
 
 ```bash
