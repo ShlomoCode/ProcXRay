@@ -117,6 +117,9 @@ struct ProcessTable: View {
                     .width(min: 120, ideal: 300)
             }
         }
+        // A new sort rebuilds the table: diffing it as row moves tears down every realized cell view
+        // one by one, which freezes the UI for seconds on a reversed sort.
+        .id(sort)
         .contextMenu(forSelectionType: ProcNode.ID.self) { ids in
             if let id = ids.first, id >= 0, let p = store.procs[pid_t(id)] {
                 Button("Terminate (SIGTERM)") { onSignal(p.pid, SIGTERM, "SIGTERM") }

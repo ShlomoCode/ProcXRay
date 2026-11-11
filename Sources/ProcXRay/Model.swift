@@ -85,8 +85,10 @@ struct ProcNode: Identifiable, Sendable {
 
     var nameKey: String { title.lowercased() }
     var pidKey: Int { proc.map { Int($0.pid) } ?? Int(Int32.max) }
-    var cpuKey: Double { proc?.cpuPercent ?? children?.reduce(0) { $0 + $1.cpuKey } ?? 0 }
-    var memKey: UInt64 { proc?.footprint ?? children?.reduce(0) { $0 + $1.memKey } ?? 0 }
+    /// Subtree totals for rows without their own value; filled in by `Store.sorted`, because computing
+    /// them on read re-walks the whole subtree on every sort comparison.
+    var cpuKey: Double = 0
+    var memKey: UInt64 = 0
     var userKey: String { proc?.user ?? "" }
     var signerKey: String { proc?.signer ?? "" }
     var threadsKey: Int32 { proc?.threads ?? 0 }
@@ -211,9 +213,12 @@ final class Store: ObservableObject {
                 self.signCache.merge(found) { a, _ in a }
                 let live = Set(self.procs.values.map(\.key))
                 self.signCache = self.signCache.filter { live.contains($0.key) }
-                for (pid, var p) in self.procs {
-                    if let s = self.signCache[p.key] { p.signer = s.shortSigner; p.signID = s.identifier; self.procs[pid] = p }
+                // Assign once: each write to the @Published dictionary copies all of it and re-renders the table.
+                var procs = self.procs
+                for (pid, p) in procs {
+                    if let s = self.signCache[p.key] { procs[pid]?.signer = s.shortSigner; procs[pid]?.signID = s.identifier }
                 }
+                self.procs = procs
                 self.signing = false
             }
         }
@@ -395,7 +400,9 @@ final class Store: ObservableObject {
             }
         }
         if !filter.isEmpty { roots = prune(roots, filter) }
-        return sorted(roots, sort)
+        // Break ties by id: `procs` is rebuilt every refresh in a new hash order, so rows with equal keys
+        // (every "—" under Memory or CPU) would reshuffle each tick and the table would move them all.
+        return sorted(roots, sort + [KeyPathComparator(\ProcNode.id)])
     }
 
     /// Row id for a synthetic coalition group. Below every ghost id (-pid - 1); nested resource
@@ -434,11 +441,13 @@ final class Store: ObservableObject {
     }
 
     private func sorted(_ nodes: [ProcNode], _ sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
-        nodes.sorted(using: sort).map { n in
+        nodes.map { n in
             var m = n
-            if let c = n.children { m.children = sorted(c, sort) }
+            m.children = n.children.map { sorted($0, sort) }
+            m.cpuKey = n.proc?.cpuPercent ?? m.children?.reduce(0) { $0 + $1.cpuKey } ?? 0
+            m.memKey = n.proc?.footprint ?? m.children?.reduce(0) { $0 + $1.memKey } ?? 0
             return m
-        }
+        }.sorted(using: sort)
     }
 
     // MARK: Actions
