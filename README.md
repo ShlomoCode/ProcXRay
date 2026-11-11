@@ -13,6 +13,8 @@ Requires full Xcode (`/Applications/Xcode.app`). The Command Line Tools SDK for 
 
 `build-app.sh` signs with the first "Apple Development" identity in your keychain (override with `SIGN_ID=…`). It also rewrites the binary's recorded SDK version with `vtool`: SwiftPM records sdk = deployment target (14.0), which makes AppKit run the app in macOS 14 compatibility mode (opaque toolbar, thicker split divider and a visible kink where the sidebar meets the toolbar).
 
+The app icon (a chip under an X-ray scan beam) is drawn in code by `tools/make-icon.swift`; regenerate `Resources/AppIcon.icns` with `swift tools/make-icon.swift Resources`.
+
 ## Privileged helper
 
 The sidebar's **Install Privileged Helper…** button registers a root daemon through `SMAppService.daemon`. macOS asks you to approve it once under System Settings → General → Login Items. The helper is the same binary started by launchd as `ProcXRay --helper`.
