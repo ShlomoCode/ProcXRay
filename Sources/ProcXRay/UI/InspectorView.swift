@@ -89,7 +89,10 @@ struct InspectorView: View {
             if viaHelper {
                 out = HelperClient.shared.run(tool, pid: pid) ?? "helper did not answer"
             } else {
-                let (path, args) = tool.argv(pid: pid)!
+                // argv refuses pid 0 (kernel_task): it isn't a user-space task these tools can attach to.
+                guard let (path, args) = tool.argv(pid: pid) else {
+                    return "\(tool) can't inspect pid \(pid) (kernel_task is not a user-space process)."
+                }
                 out = Shell.run(path, args)
             }
             let failed = out.isEmpty || out.contains("not permitted") || out.contains("Unable to") || out.contains("failed")
