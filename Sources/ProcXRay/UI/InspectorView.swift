@@ -22,21 +22,20 @@ struct InspectorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                if let img = IconCache.icon(for: proc) { Image(nsImage: img) }
-                Text(proc.name).font(.headline)
-                Text(verbatim: "pid \(proc.pid)").foregroundStyle(.secondary).monospacedDigit()
-                if let path = proc.path {
-                    Text(path).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            // Fixed-height header: a missing icon or path must not shift the tab strip below it.
+            HStack(spacing: 6) {
+                Group {
+                    if let img = IconCache.icon(for: proc) { Image(nsImage: img) } else { Image(systemName: "terminal") }
                 }
+                .frame(width: 16, height: 16)
+                Text(proc.name).font(.headline).lineLimit(1)
+                Text(verbatim: "pid \(proc.pid)").foregroundStyle(.secondary).monospacedDigit()
+                Text(proc.path ?? "").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10).padding(.top, 6)
-            Picker("", selection: $tab) {
-                ForEach(InspectorTab.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden()
-            .padding(.horizontal, 10).padding(.vertical, 6)
+            .frame(height: 22)
+            .padding(.horizontal, 10).padding(.top, 4)
+            InspectorTabStrip(selection: $tab)
             Divider()
             Group {
                 switch tab {
@@ -87,6 +86,37 @@ struct InspectorView: View {
             }
             return out
         }
+    }
+}
+
+/// Leading-anchored tab strip. Each tab is sized to its own label (no weight change on selection,
+/// which would resize it), and the strip scrolls horizontally when the pane is too narrow instead of
+/// overflowing and getting re-centred — the overflow is what made the old segmented control jump.
+struct InspectorTabStrip: View {
+    @Binding var selection: InspectorTab
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(InspectorTab.allCases) { t in
+                    let on = t == selection
+                    Button { selection = t } label: {
+                        Text(t.rawValue)
+                            .font(.system(size: 12))
+                            .foregroundStyle(on ? Color.primary : Color.secondary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 24)
+                            .background(on ? Color.accentColor.opacity(0.18) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 6))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(on ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 8)
+        }
+        .frame(height: 34)
     }
 }
 
