@@ -28,6 +28,9 @@ struct ProcessesView: View {
             ProcessTable(store: store, nodes: nodes, selection: $selection, sort: $sort, grouping: grouping) { pid, sig, label in
                 pendingSignal = (pid, sig, label)
             }
+            // A grouping switch re-parents nearly every row. Diffing that through the outline view's
+            // move/insert path could peg a core for 15-20 s with groups expanded; a fresh table is cheap.
+            .id(grouping)
         } bottom: {
             Group {
                 if let id = selection, id >= 0, let p = store.procs[pid_t(id)] {

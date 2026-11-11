@@ -107,8 +107,8 @@ struct ProcNode: Identifiable, Sendable {
 
 @MainActor
 final class Store: ObservableObject {
-    @Published var procs: [pid_t: ProcInfo] = [:]
-    @Published var lsApps: [LSApp] = []
+    @Published var procs: [pid_t: ProcInfo] = [:] { didSet { dataGen &+= 1 } }
+    @Published var lsApps: [LSApp] = [] { didSet { dataGen &+= 1 } }
     @Published var jobs: [LaunchdJob] = []
     @Published var btm: [BTMItem] = []
     @Published var btmLoading = false
@@ -116,6 +116,10 @@ final class Store: ObservableObject {
     @Published var interval: Double = 2
     @Published var lastRefresh = Date()
     @Published var refreshMillis = 0
+
+    /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
+    private var dataGen = 0
+    private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>], nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
     private var prevCPU: [String: (UInt64, UInt64)] = [:]   // key -> (cpuNanos, wall uptime nanos)
@@ -211,9 +215,17 @@ final class Store: ObservableObject {
                 self.signCache.merge(found) { a, _ in a }
                 let live = Set(self.procs.values.map(\.key))
                 self.signCache = self.signCache.filter { live.contains($0.key) }
-                for (pid, var p) in self.procs {
-                    if let s = self.signCache[p.key] { p.signer = s.shortSigner; p.signID = s.identifier; self.procs[pid] = p }
+                // snapshot() already applied every older cache entry; patch only the processes that were
+                // just inspected, on a local copy, and publish once. Writing self.procs[pid] in a loop
+                // copied the whole dictionary per write and invalidated the table ~700 times.
+                var procs = self.procs
+                var changed = false
+                for (pid, p) in procs {
+                    guard let s = found[p.key], p.signer != s.shortSigner || p.signID != s.identifier else { continue }
+                    procs[pid]!.signer = s.shortSigner; procs[pid]!.signID = s.identifier
+                    changed = true
                 }
+                if changed { self.procs = procs }
                 self.signing = false
             }
         }
@@ -333,6 +345,13 @@ final class Store: ObservableObject {
     }
 
     func nodes(grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
+        if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.sort == sort { return c.nodes }
+        let out = buildNodes(grouping: grouping, filter: filter, sort: sort)
+        nodesCache = (dataGen, grouping, filter, sort, out)
+        return out
+    }
+
+    private func buildNodes(grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
         let all = Array(procs.values)
         var roots: [ProcNode]
         switch grouping {
@@ -433,8 +452,20 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Ties are broken by row id. Without that, rows that tie (every group row has the same pidKey)
+    /// kept Dictionary iteration order, which reshuffles whenever a process comes or goes; the table then
+    /// saw hundreds of moved rows per refresh and spent seconds rebuilding and re-measuring row views.
     private func sorted(_ nodes: [ProcNode], _ sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
-        nodes.sorted(using: sort).map { n in
+        nodes.sorted { a, b in
+            for c in sort {
+                switch c.compare(a, b) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: continue
+                }
+            }
+            return a.id < b.id
+        }.map { n in
             var m = n
             if let c = n.children { m.children = sorted(c, sort) }
             return m
