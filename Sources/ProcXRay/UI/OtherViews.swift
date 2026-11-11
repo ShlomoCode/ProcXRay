@@ -255,6 +255,22 @@ enum SelfTest {
             print("ls \(a.name) pid \(a.pid ?? -1) coal \(a.coalition ?? 0) members \(a.coalitionPIDs) related \(a.relatedCoalitionIDs)/\(a.relatedCoalitionPIDs)")
         }
         print("launchd jobs: \(snap.jobs.count), running: \(snap.jobs.filter { $0.pid != nil }.count)")
+        // Every grouping must place each process exactly once, with unique row ids.
+        let store = Store(); store.procs = procs; store.lsApps = snap.ls
+        for g in Grouping.allCases {
+            let roots = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.pidKey)])
+            var ids: [Int] = [], pids: [pid_t] = []
+            func walk(_ n: ProcNode) { ids.append(n.id); if let p = n.proc { pids.append(p.pid) }; n.children?.forEach(walk) }
+            roots.forEach(walk)
+            let ok = Set(ids).count == ids.count && pids.count == procs.count && Set(pids) == Set(procs.keys)
+            print("grouping \(g.label): \(roots.count) roots, \(pids.count) procs, \(ids.count) rows — \(ok ? "ok" : "MISMATCH")")
+            if g == .jetsam {
+                for r in roots.filter({ ($0.children ?? []).contains { $0.proc == nil } })
+                    .sorted(by: { ($0.children?.count ?? 0) > ($1.children?.count ?? 0) }).prefix(4) {
+                    print("  \(r.title): \(r.subtitle); first: \(r.children!.filter { $0.proc == nil }.map(\.title).sorted().prefix(2))")
+                }
+            }
+        }
         for g in Store.ghosts(procs: procs, lsApps: snap.ls) {
             print("left behind by \(g.name) (dead pid \(g.deadPid)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
         }

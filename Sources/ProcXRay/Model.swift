@@ -67,9 +67,11 @@ struct Ghost: Identifiable, Sendable {
 enum Grouping: String, CaseIterable, Identifiable {
     case parent = "Parent tree"
     case responsible = "Responsible tree"
-    case coalition = "Coalition"
+    case coalition = "Coalition"   // raw value kept stable: it's persisted in @AppStorage("grouping")
+    case jetsam = "Jetsam coalition"
     case flat = "Flat"
     var id: String { rawValue }
+    var label: String { self == .coalition ? "Resource coalition" : rawValue }
 }
 
 /// A row in the process table: a real process, or a synthetic group (dead responsible app / coalition).
@@ -90,6 +92,7 @@ struct ProcNode: Identifiable, Sendable {
     var threadsKey: Int32 { proc?.threads ?? 0 }
     var respKey: Int { proc?.responsible.map(Int.init) ?? 0 }
     var coalKey: UInt64 { proc?.coalition ?? 0 }
+    var jetsamKey: UInt64 { proc?.jetsamCoalition ?? 0 }
     var startKey: Date { proc?.start ?? .distantPast }
     var diskKey: UInt64 { (proc?.diskRead ?? 0) + (proc?.diskWrite ?? 0) }
 
@@ -364,14 +367,40 @@ final class Store: ObservableObject {
             roots = groups.map { coal, members in
                 let leader = members.first { $0.responsible == $0.pid } ?? members.min { $0.pid < $1.pid }!
                 let title = (lsByCoal[coal] ?? members.lazy.compactMap { $0.jetsamCoalition.flatMap { lsByCoal[$0] } }.first)?.name ?? leader.name
-                return ProcNode(id: -Int(coal) - 10_000_000, proc: nil,
+                return ProcNode(id: Self.groupID(coal, sub: false), proc: nil,
                                 title: "\(title)  [coalition \(coal)]", subtitle: "\(members.count) processes",
                                 children: members.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) })
+            }
+        case .jetsam:
+            // One jetsam coalition can hold several resource coalitions (a host plus each of its app
+            // extensions); the reverse doesn't occur. Nest resource coalitions when there's more than one.
+            let groups = Dictionary(grouping: all) { $0.jetsamCoalition ?? 0 }
+            let lsByCoal = Dictionary(lsApps.compactMap { a in a.coalition.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
+            func leader(_ ps: [ProcInfo]) -> ProcInfo { ps.first { $0.responsible == $0.pid } ?? ps.min { $0.pid < $1.pid }! }
+            func leaves(_ ps: [ProcInfo]) -> [ProcNode] { ps.map { ProcNode(id: Int($0.pid), proc: $0, title: $0.name) } }
+            roots = groups.map { jet, members in
+                let byRes = Dictionary(grouping: members) { $0.coalition ?? 0 }
+                // The host's resource coalition is created before its extensions', so the lowest id leads.
+                let host = byRes.keys.min()!
+                let title = lsByCoal[jet]?.name ?? leader(byRes[host]!).name
+                let children: [ProcNode] = byRes.count == 1 ? leaves(members) : byRes.map { res, ps in
+                    ProcNode(id: Self.groupID(res, sub: true), proc: nil,
+                             title: "\(leader(ps).name)  [resource \(res)]", subtitle: "\(ps.count) processes",
+                             children: leaves(ps))
+                }
+                let sub = byRes.count == 1 ? "\(members.count) processes"
+                                           : "\(members.count) processes in \(byRes.count) resource coalitions"
+                return ProcNode(id: Self.groupID(jet, sub: false), proc: nil,
+                                title: "\(title)  [jetsam \(jet)]", subtitle: sub, children: children)
             }
         }
         if !filter.isEmpty { roots = prune(roots, filter) }
         return sorted(roots, sort)
     }
+
+    /// Row id for a synthetic coalition group. Below every ghost id (-pid - 1); nested resource
+    /// subgroups get odd offsets so they can't collide with a top-level group of the same id.
+    private static func groupID(_ coal: UInt64, sub: Bool) -> Int { -10_000_000 - 2 * Int(coal) - (sub ? 1 : 0) }
 
     /// Build a forest using `parentOf`; unknown parents (negative ids) become temporary placeholder roots.
     private func tree(_ all: [ProcInfo], parentOf: (ProcInfo) -> Int?) -> [ProcNode] {

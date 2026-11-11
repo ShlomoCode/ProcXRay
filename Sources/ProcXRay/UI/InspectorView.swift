@@ -175,12 +175,13 @@ struct GeneralTab: View {
             return "† \(name ?? "exited process") (\(r)) — no longer running"
         }()
         let coalMembers = p.coalition.map { c in store.procs.values.filter { $0.coalition == c }.count } ?? 0
+        let jetMembers = p.jetsamCoalition.map { c in store.procs.values.filter { $0.jetsamCoalition == c }.count } ?? 0
         var rows: [(String, String)] = [
             ("Path", p.path ?? "— (\(p.comm))"),
             ("Working dir", cwd ?? "—"),
             ("Parent", "\(parent?.name ?? "?") (\(p.ppid))"),
             ("Responsible", resp),
-            ("Coalition", p.coalition.map { "resource \($0) · jetsam \(p.jetsamCoalition ?? 0) · \(coalMembers) member(s)" } ?? "—"),
+            ("Coalition", p.coalition.map { "resource \($0) (\(coalMembers) member(s)) · jetsam \(p.jetsamCoalition.map(String.init) ?? "—") (\(jetMembers) member(s))" } ?? "—"),
             ("Process group", "\(p.pgid)"),
             ("User", "\(p.user) (uid \(p.uid))"),
             ("Started", "\(Fmt.date.string(from: p.start))  (\(Fmt.age(p.start)) ago)"),
@@ -247,11 +248,17 @@ struct LineageTab: View {
         let children = store.procs.values.filter { $0.ppid == proc.pid && $0.pid != proc.pid }.sorted { $0.pid < $1.pid }
         let attributed = store.procs.values.filter { $0.responsible == proc.pid && $0.pid != proc.pid }.sorted { $0.pid < $1.pid }
         let coal = proc.coalition.map { c in store.procs.values.filter { $0.coalition == c && $0.pid != proc.pid }.sorted { $0.pid < $1.pid } } ?? []
+        // Jetsam-mates outside the resource coalition: typically the host app and its extensions.
+        let jet = proc.jetsamCoalition.map { j in
+            store.procs.values.filter { $0.jetsamCoalition == j && $0.pid != proc.pid && $0.coalition != proc.coalition }
+                .sorted { $0.pid < $1.pid }
+        } ?? []
         List {
             SwiftUI.Section("Parent chain (ppid → launchd)") { ForEach(ancestors) { row($0) } }
             SwiftUI.Section("Children (\(children.count))") { ForEach(children) { row($0) } }
             SwiftUI.Section("Processes this one is responsible for (\(attributed.count))") { ForEach(attributed) { row($0) } }
-            SwiftUI.Section("Same coalition (\(coal.count))") { ForEach(coal) { row($0) } }
+            SwiftUI.Section("Same resource coalition (\(coal.count))") { ForEach(coal) { row($0) } }
+            SwiftUI.Section("Same jetsam coalition, other resource coalitions (\(jet.count))") { ForEach(jet) { row($0) } }
         }
     }
 

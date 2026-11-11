@@ -50,8 +50,8 @@ The sidebar's **Install Privileged Helper…** button registers a root daemon th
 
 ## What it shows
 
-- **Processes**: parent tree, responsible tree (dead responsible apps appear as `†` groups), coalition groups, or flat. Columns cover CPU, physical footprint, threads, user, responsible process, coalition, signer, disk I/O and age; badges mark LEFT (responsible gone), ZOMBIE, ROSETTA, SBX (sandboxed) and EXITED.
-- **Inspector**: General, Lineage (parent chain, children, processes it is responsible for, coalition members), Signature (team, authority chain, CDHash, static and runtime CS flags), Entitlements, Args & Env, Files & Sockets (`lsof`), Memory Map (`vmmap --summary`), Sample (`sample`, 1 s), Logs (`/usr/bin/log`, filtered to the pid), launchd/LaunchServices.
+- **Processes**: parent tree, responsible tree (dead responsible apps appear as `†` groups), resource coalition groups, jetsam coalition groups (a host with its app extensions, each extension's resource coalition nested inside), or flat. Columns cover CPU, physical footprint, threads, user, responsible process, resource and jetsam coalition ids, signer, disk I/O and age; badges mark LEFT (responsible gone), ZOMBIE, ROSETTA, SBX (sandboxed) and EXITED.
+- **Inspector**: General, Lineage (parent chain, children, processes it is responsible for, resource coalition members, and jetsam coalition members outside its resource coalition), Signature (team, authority chain, CDHash, static and runtime CS flags), Entitlements, Args & Env, Files & Sockets (`lsof`), Memory Map (`vmmap --summary`), Sample (`sample`, 1 s), Logs (`/usr/bin/log`, filtered to the pid), launchd/LaunchServices.
 - **Visual / Raw**: every tool-backed pane is parsed (`Sys/Parsers.swift`) and drawn visually (`UI/Visualizers.swift`): lsof as a typed, filterable socket/file table with TCP state badges; vmmap as footprint tiles, portion bars, a region bar chart and sortable region/malloc-zone tables; sample as a collapsible call tree with per-thread busy/idle summaries; logs as a level-stacked event histogram plus table; launchctl print/procinfo and lsappinfo as cards; entitlements grouped into private / sandbox / other. A Visual/Raw switch (remembered app-wide) shows the original text, and output that can't be parsed (errors, permission notes) falls back to it automatically.
 - **Left Behind**: processes that keep an app in the "running in background" state after it quits. Detected two ways: a responsible pid that no longer exists, and LaunchServices entries marked `exited-with-subordinates`, matched through their coalition and related pids.
 - **LaunchServices Apps**: parsed `lsappinfo list`, including coalition members and related pids.
@@ -70,6 +70,8 @@ Runs unprivileged. Task info, arguments and environment are only readable for yo
 ## Notes
 
 - `lsappinfo`'s `coalition:` field is the **jetsam** coalition id, not the resource coalition. The jetsam id is often the resource id + 1, but not always (on one machine, 116 of 703 processes differed), so match against both ids rather than deriving one from the other.
+- Several resource coalitions can share one jetsam coalition: app extensions (widgets, wallpapers, QuickLook thumbnailers, `DeviceFS`) get a resource coalition of their own but join their host's jetsam coalition. The reverse (one resource coalition spanning several jetsam coalitions) wasn't observed.
+- `PROC_PIDCOALITIONINFO` returns 40 bytes on current macOS; a 32-byte buffer fails.
 - In zsh, `log` is a shell builtin that shadows `/usr/bin/log`. Always use the full path.
 - `ProcXRay --dump [--pid N] [--btm]` prints a self-test snapshot for cross-checking against `ps` and `lsappinfo`. `--btm` triggers the password prompt.
 - `ProcXRay --spawn-leftover` starts a detached `sleep 120` and exits, which reproduces the "app quit but a helper kept running" state.

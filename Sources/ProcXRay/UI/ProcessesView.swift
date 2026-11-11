@@ -46,11 +46,11 @@ struct ProcessesView: View {
             ToolbarItemGroup {
                 Menu {
                     Picker("Group", selection: $grouping) {
-                        ForEach(Grouping.allCases) { Text($0.rawValue).tag($0) }
+                        ForEach(Grouping.allCases) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.inline)
                 } label: {
-                    Label(grouping.rawValue, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
+                    Label(grouping.label, systemImage: "list.bullet.indent").labelStyle(.titleAndIcon)
                 }
                 .fixedSize()
                 Button { store.paused.toggle() } label: {
@@ -103,7 +103,9 @@ struct ProcessTable: View {
             Group {
                 TableColumn("Responsible", value: \ProcNode.respKey) { n in RespCell(proc: n.proc, procs: procs) }
                     .width(min: 80, ideal: 130)
-                TableColumn("Coalition", value: \ProcNode.coalKey) { n in Text(n.proc?.coalition.map(String.init) ?? "").monospacedDigit() }
+                TableColumn("Res. coal.", value: \ProcNode.coalKey) { n in Text(n.proc?.coalition.map(String.init) ?? "").monospacedDigit() }
+                    .width(min: 50, ideal: 64)
+                TableColumn("Jetsam", value: \ProcNode.jetsamKey) { n in Text(n.proc?.jetsamCoalition.map(String.init) ?? "").monospacedDigit() }
                     .width(min: 50, ideal: 64)
                 TableColumn("Signer", value: \ProcNode.signerKey) { n in Text(n.proc?.signer ?? "").foregroundStyle(n.proc?.signer == "unsigned" ? .red : .primary) }
                     .width(min: 70, ideal: 110)
