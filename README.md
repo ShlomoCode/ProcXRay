@@ -69,7 +69,7 @@ Runs unprivileged. Task info, arguments and environment are only readable for yo
 
 ## Notes
 
-- `lsappinfo`'s `coalition:` field is the **jetsam** coalition id (resource id + 1), not the resource coalition.
+- `lsappinfo`'s `coalition:` field is the **jetsam** coalition id, not the resource coalition. The jetsam id is often the resource id + 1, but not always (on one machine, 116 of 703 processes differed), so match against both ids rather than deriving one from the other.
 - In zsh, `log` is a shell builtin that shadows `/usr/bin/log`. Always use the full path.
 - `ProcXRay --dump [--pid N] [--btm]` prints a self-test snapshot for cross-checking against `ps` and `lsappinfo`. `--btm` triggers the password prompt.
 - `ProcXRay --spawn-leftover` starts a detached `sleep 120` and exits, which reproduces the "app quit but a helper kept running" state.
