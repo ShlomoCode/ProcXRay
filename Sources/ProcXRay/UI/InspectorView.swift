@@ -43,17 +43,30 @@ struct InspectorView: View {
                 case .lineage: LineageTab(proc: proc)
                 case .signature: SignatureTab(proc: proc)
                 case .entitlements:
-                    MonoText(text: store.signInfo(for: proc)?.entitlementsXML ?? "No entitlements (or not yet loaded).")
+                    let xml = store.signInfo(for: proc)?.entitlementsXML
+                    OutputPane(raw: xml ?? "No entitlements (or not yet loaded).", filterable: true) { f in
+                        EntitlementsView(xml: xml, filter: f)
+                    }
                 case .args: ArgsTab(proc: proc)
-                case .files: toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)")
-                case .memory: toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)")
-                case .sample: toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)")
-                case .logs: CommandTab(key: "log\(proc.key)", auto: false,
-                                       title: "/usr/bin/log show --last 10m — events from pid \(proc.pid) or mentioning it") {
-                    // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
-                    Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
-                        "--predicate", "processID == \(proc.pid) OR eventMessage CONTAINS \"\(proc.pid)\""])
-                }
+                case .files:
+                    toolTab(.lsof, auto: true, title: "lsof -n -P -p \(proc.pid)",
+                            parse: LsofParser.parse, isEmpty: \.isEmpty) { LsofView(entries: $0, filter: $1) }
+                case .memory:
+                    toolTab(.vmmap, auto: false, title: "vmmap --summary \(proc.pid)",
+                            parse: VmmapParser.parse, isEmpty: \.isEmpty) { VmmapView(s: $0, filter: $1) }
+                case .sample:
+                    toolTab(.sample, auto: false, title: "sample \(proc.pid) 1 (all thread stacks for 1s)",
+                            parse: SampleParser.parse, isEmpty: \.threads.isEmpty) { SampleView(report: $0, filter: $1) }
+                case .logs:
+                    let pid = proc.pid
+                    CommandTab(key: "log\(proc.key)", auto: false,
+                               title: "/usr/bin/log show --last 10m — events from pid \(pid) or mentioning it",
+                               command: {
+                                   // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
+                                   Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
+                                       "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""])
+                               },
+                               parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
                 case .launch: LaunchTab(proc: proc)
                 }
             }
@@ -63,12 +76,15 @@ struct InspectorView: View {
 
     /// lsof / vmmap / sample need root (or task_for_pid rights) for most processes: route them through
     /// the helper whenever it's running; otherwise run them as the user and explain failures.
-    private func toolTab(_ tool: HelperTool, auto: Bool, title: String) -> some View {
+    private func toolTab<P, V: View>(_ tool: HelperTool, auto: Bool, title: String,
+                                     parse: @escaping @Sendable (String) -> P, isEmpty: @escaping (P) -> Bool,
+                                     @ViewBuilder visual: @escaping (P, String) -> V) -> some View {
         let viaHelper = store.helperState.isRunning
         let pid = proc.pid
         let platform = store.signInfo(for: proc)?.isPlatform == true
         return CommandTab(key: "\(tool)\(proc.key)\(viaHelper)", auto: auto,
-                          title: title + (viaHelper ? "   [as root via helper]" : "   [as \(NSUserName())]")) {
+                          title: title + (viaHelper ? "   [as root via helper]" : "   [as \(NSUserName())]"),
+                          command: {
             var out: String
             if viaHelper {
                 out = HelperClient.shared.run(tool, pid: pid) ?? "helper did not answer"
@@ -85,7 +101,7 @@ struct InspectorView: View {
                 out += "\n\n— Running as \(NSUserName()): another user's open files aren't visible. Install the helper for full output."
             }
             return out
-        }
+        }, parse: parse, isEmpty: isEmpty, visual: visual)
     }
 }
 
@@ -288,9 +304,12 @@ struct ArgsTab: View {
     var body: some View {
         Group {
             if let info {
-                MonoText(text: "exec: \(info.execPath)\n\n── argv (\(info.args.count)) ──\n"
+                OutputPane(raw: "exec: \(info.execPath)\n\n── argv (\(info.args.count)) ──\n"
                          + info.args.enumerated().map { "[\($0)] \($1)" }.joined(separator: "\n")
-                         + "\n\n── environment (\(info.env.count)) ──\n" + info.env.sorted().joined(separator: "\n"))
+                         + "\n\n── environment (\(info.env.count)) ──\n" + info.env.sorted().joined(separator: "\n"),
+                           filterable: true) { f in
+                    ArgsEnvView(info: info, filter: f)
+                }
             } else if loaded {
                 Text("Arguments not readable (other user's process, or it has exited).").foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -313,45 +332,70 @@ struct ArgsTab: View {
 
 // MARK: - Shell-backed tabs
 
-struct CommandTab: View {
+struct CommandTab<Parsed, Visual: View>: View {
     let key: String
     let auto: Bool
     let title: String
     let command: @Sendable () -> String
+    let parse: @Sendable (String) -> Parsed
+    let isEmpty: (Parsed) -> Bool
+    @ViewBuilder let visual: (Parsed, String) -> Visual
     @State private var output: String?
+    @State private var parsed: Parsed?
+    @State private var generation = 0
     @State private var running = false
     @State private var filter = ""
+    @AppStorage("showRawOutput") private var showRaw = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(title).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                RawToggle(showRaw: $showRaw)
+                Text(title).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                TextField("filter lines", text: $filter).textFieldStyle(.roundedBorder).frame(width: 180)
+                TextField(showRaw ? "filter lines" : "filter", text: $filter).textFieldStyle(.roundedBorder).frame(width: 180)
                 Button(output == nil ? "Run" : "Re-run") { run() }.disabled(running)
                 if running { ProgressView().controlSize(.small) }
             }
             .padding(6)
             Divider()
             if let output {
-                MonoText(text: filter.isEmpty ? output : output.split(separator: "\n")
-                    .filter { $0.localizedCaseInsensitiveContains(filter) }.joined(separator: "\n"))
+                if showRaw {
+                    MonoText(text: filterLines(output, filter))
+                } else if let parsed, !isEmpty(parsed) {
+                    visual(parsed, filter).id(generation)   // fresh view state (expansion, chips) per run
+                } else if parsed != nil {
+                    UnparsedNote(raw: output)
+                } else {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else {
-                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "play.circle").font(.largeTitle).foregroundStyle(.secondary)
+                    Text("Press Run to collect this data.").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(running ? 0 : 1)
             }
         }
         .task(id: key) {
             output = nil
+            parsed = nil
             if auto { run() }
         }
     }
 
     private func run() {
         running = true
-        let cmd = command
+        let cmd = command, parse = parse
         Task {
-            let out = await Task.detached { cmd() }.value
+            let (out, p) = await Task.detached { () -> (String, Parsed) in
+                let o = cmd()
+                return (o, parse(o))
+            }.value
             output = out
+            parsed = p
+            generation += 1
             running = false
         }
     }
@@ -360,33 +404,80 @@ struct CommandTab: View {
 struct LaunchTab: View {
     @EnvironmentObject var store: Store
     let proc: ProcInfo
-    @State private var text = ""
+    @State private var ls: String?
+    @State private var job: (title: String, text: String)?
+    @State private var procinfo: (title: String, text: String)?
+    @State private var loading = true
+
+    private var raw: String {
+        var s = ""
+        if let ls { s += "── LaunchServices (lsappinfo) ──\n\(ls)\n\n" }
+        else { s += "── LaunchServices ──\nnot registered as an app with LaunchServices\n\n" }
+        if let job { s += "── \(job.title) ──\n\(job.text)\n" }
+        if let procinfo { s += "\n── \(procinfo.title) ──\n\(procinfo.text)" }
+        return s
+    }
 
     var body: some View {
-        MonoText(text: text).task(id: proc.key) {
-            text = "loading…"
+        Group {
+            if loading {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                OutputPane(raw: raw, filterable: true) { f in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            section("LaunchServices", "app.badge") {
+                                if let ls { LSRecordContent(raw: ls, filter: f) }
+                                else { note("Not registered as an app with LaunchServices.") }
+                            }
+                            if let job {
+                                section(job.title, "gearshape.2") {
+                                    let nodes = LaunchctlParser.parse(job.text)
+                                    if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: f) } else { note(job.text) }
+                                }
+                            }
+                            if let procinfo {
+                                section(procinfo.title, "person.badge.shield.checkmark") {
+                                    let nodes = LaunchctlParser.parse(procinfo.text)
+                                    if nodes.count > 1 { KVTreeContent(nodes: nodes, filter: f) } else { note(procinfo.text) }
+                                }
+                            }
+                        }
+                        .padding(10)
+                    }
+                }
+            }
+        }
+        .task(id: proc.key) {
+            loading = true
             let label = proc.launchdLabel
-            let ls = store.lsApps.first { $0.pid == proc.pid }
+            let lsRaw = store.lsApps.first { $0.pid == proc.pid }?.raw
             let pid = proc.pid
             let helper = store.helperState.isRunning
-            text = await Task.detached {
-                var s = ""
-                if let ls { s += "── LaunchServices (lsappinfo) ──\n\(ls.raw)\n\n" }
-                else { s += "── LaunchServices ──\nnot registered as an app with LaunchServices\n\n" }
-                if let label {
-                    s += "── launchctl print \(label) ──\n" + Launchd.printJob(label)
-                } else {
-                    s += "── launchd ──\npid \(pid) is not the main process of a launchd job in your domain.\n"
-                }
-                if helper {
-                    s += "\n── launchctl procinfo \(pid) (as root via helper) ──\n"
-                    s += HelperClient.shared.run(.launchctlProcinfo, pid: pid) ?? "helper did not answer"
-                } else {
-                    s += "\n(`launchctl procinfo \(pid)` shows full launchd attribution — install the privileged helper to see it.)\n"
-                }
-                return s
+            let (j, p) = await Task.detached { () -> ((String, String), (String, String)) in
+                let j = label.map { ("launchctl print \($0)", Launchd.printJob($0)) }
+                    ?? ("launchd", "pid \(pid) is not the main process of a launchd job in your domain.")
+                let p = helper
+                    ? ("launchctl procinfo \(pid) (as root via helper)", HelperClient.shared.run(.launchctlProcinfo, pid: pid) ?? "helper did not answer")
+                    : ("launchctl procinfo", "`launchctl procinfo \(pid)` shows full launchd attribution — install the privileged helper to see it.")
+                return (j, p)
             }.value
+            ls = lsRaw
+            job = (j.0, j.1)
+            procinfo = (p.0, p.1)
+            loading = false
         }
+    }
+
+    private func section<C: View>(_ title: String, _ icon: String, @ViewBuilder _ c: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon).font(.title3.weight(.semibold))
+            c()
+        }
+    }
+
+    private func note(_ s: String) -> some View {
+        Text(s).foregroundStyle(.secondary).font(.callout).textSelection(.enabled)
     }
 }
 

@@ -95,7 +95,9 @@ struct AppsView: View {
             }
         } bottom: {
             if let id = selection, let a = store.lsApps.first(where: { $0.id == id }) {
-                MonoText(text: a.raw)
+                OutputPane(raw: a.raw, filterable: true) { f in
+                    ScrollView { LSRecordContent(raw: a.raw, filter: f).padding(10) }
+                }
             } else {
                 PanePlaceholder(text: "Select an app to see its raw lsappinfo record")
             }
@@ -205,7 +207,10 @@ struct LaunchdView: View {
                 TableColumn("Process") { j in Text(j.pid.flatMap { procs[$0]?.path } ?? "").foregroundStyle(.secondary) }
             }
         } bottom: {
-            if selection != nil { MonoText(text: detail) } else { PanePlaceholder(text: "Select a job to see launchctl print") }
+            if selection != nil {
+                if detail == "loading…" { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
+                else { OutputPane(raw: detail, filterable: true) { f in KVTreeView(text: detail, filter: f) } }
+            } else { PanePlaceholder(text: "Select a job to see launchctl print") }
         }
         .task(id: selection) {
             guard let label = selection else { return }
