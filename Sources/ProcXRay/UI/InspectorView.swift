@@ -210,10 +210,13 @@ struct GeneralTab: View {
         return KV(rows: rows).task(id: p.key) {
             let pid = p.pid
             let helper = store.helperState.isRunning
-            cwd = await Task.detached { () -> String? in
+            let c = await Task.detached { () -> String? in
                 if let c = Native.cwd(pid) { return c }
                 return helper ? HelperClient.shared.argsEnv(pid)?.cwd : nil
             }.value
+            // The detached load doesn't stop when the selection changes; drop a result for an old one.
+            guard !Task.isCancelled else { return }
+            cwd = c
         }
     }
 
@@ -330,11 +333,13 @@ struct ArgsTab: View {
         .task(id: proc.key) {
             let pid = proc.pid
             let helper = store.helperState.isRunning
-            info = await Task.detached { () -> Native.ArgsEnv? in
+            let a = await Task.detached { () -> Native.ArgsEnv? in
                 if let a = Native.argsEnv(pid) { return a }
                 guard helper, let r = HelperClient.shared.argsEnv(pid) else { return nil }
                 return Native.ArgsEnv(execPath: r.execPath, args: r.args, env: r.env)
             }.value
+            guard !Task.isCancelled else { return }
+            info = a
             loaded = true
         }
     }
@@ -354,6 +359,7 @@ struct CommandTab<Parsed, Visual: View>: View {
     @State private var parsed: Parsed?
     @State private var generation = 0
     @State private var running = false
+    @State private var runTask: Task<Void, Never>?
     @State private var filter = ""
     @AppStorage("showRawOutput") private var showRaw = false
 
@@ -389,20 +395,30 @@ struct CommandTab<Parsed, Visual: View>: View {
             }
         }
         .task(id: key) {
+            // A new process (or helper state): stop the previous run so its output can't land here.
+            runTask?.cancel()
+            runTask = nil
+            running = false
             output = nil
             parsed = nil
             if auto { run() }
         }
+        .onDisappear { runTask?.cancel() }   // window closed: don't let sample / log show run on
     }
 
     private func run() {
+        runTask?.cancel()
         running = true
         let cmd = command, parse = parse
-        Task {
-            let (out, p) = await Task.detached { () -> (String, Parsed) in
-                let o = cmd()
-                return (o, parse(o))
-            }.value
+        let cancel = Shell.Cancel()
+        runTask = Task {
+            let (out, p) = await withTaskCancellationHandler {
+                await Task.detached { () -> (String, Parsed) in
+                    let o = Shell.Cancel.$current.withValue(cancel) { cmd() }
+                    return (o, parse(o))
+                }.value
+            } onCancel: { cancel.cancel() }
+            guard !Task.isCancelled else { return }
             output = out
             parsed = p
             generation += 1
@@ -472,6 +488,7 @@ struct LaunchTab: View {
                     : ("launchctl procinfo", "`launchctl procinfo \(pid)` shows full launchd attribution — install the privileged helper to see it.")
                 return (j, p)
             }.value
+            guard !Task.isCancelled else { return }
             ls = lsRaw
             job = (j.0, j.1)
             procinfo = (p.0, p.1)

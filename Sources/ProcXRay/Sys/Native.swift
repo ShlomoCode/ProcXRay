@@ -224,6 +224,16 @@ enum Shell {
         }
     }
 
+    /// Set (as a task-local) around a command whose result may stop being wanted: once cancelled, a tool
+    /// it is running is terminated.
+    final class Cancel: @unchecked Sendable {
+        @TaskLocal static var current: Cancel?
+        private let lock = NSLock()
+        private var flag = false
+        var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+        func cancel() { lock.lock(); flag = true; lock.unlock() }
+    }
+
     static func run(_ path: String, _ args: [String], mergeStderr: Bool = true, timeout: Double = 60) -> String {
         exec(path, args, mergeStderr: mergeStderr, timeout: timeout).annotated
     }
@@ -246,6 +256,8 @@ enum Shell {
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if p.isRunning { kill(pid, SIGKILL) } }
         }
 
+        let cancel = Cancel.current
+        var cancelled = false
         let fd = pipe.fileHandleForReading.fileDescriptor
         let start = DispatchTime.now()
         var exitedAt: DispatchTime?
@@ -258,14 +270,18 @@ enum Shell {
             if ready > 0 {
                 let n = read(fd, &buf, buf.count)
                 if n == 0 { break }                                   // EOF: every writer closed the pipe
-                if n < 0 { if errno == EINTR { continue }; break }
-                let room = maxBytes - data.count
-                data.append(contentsOf: buf.prefix(min(n, room)))
-                if n > room { truncated = true; stop(); break }
-                continue
+                if n < 0 && errno != EINTR { break }
+                if n > 0 {
+                    let room = maxBytes - data.count
+                    data.append(contentsOf: buf.prefix(min(n, room)))
+                    if n > room { truncated = true; stop(); break }
+                }
+            } else if ready < 0 && errno != EINTR {
+                break
             }
-            if ready < 0 && errno != EINTR { break }
+            // Checked on every pass, so a tool that keeps writing still meets its limit.
             let now = DispatchTime.now()
+            if !cancelled, cancel?.isCancelled == true { cancelled = true; stop() }
             if !timedOut, now.uptimeNanoseconds - start.uptimeNanoseconds > UInt64(timeout * 1e9) {
                 timedOut = true
                 stop()

@@ -215,7 +215,9 @@ struct LaunchdView: View {
         .task(id: selection) {
             guard let label = selection else { return }
             detail = "loading…"
-            detail = await Task.detached { Launchd.printJob(label) }.value
+            let d = await Task.detached { Launchd.printJob(label) }.value
+            guard !Task.isCancelled else { return }   // selection moved on while launchctl ran
+            detail = d
         }
         .searchable(text: $search, placement: .toolbar)
         .toolbar { Toggle("Running only", isOn: $runningOnly) }
