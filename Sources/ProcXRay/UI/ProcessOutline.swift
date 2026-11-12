@@ -514,7 +514,9 @@ struct ProcessOutline: NSViewRepresentable {
             case .threads: set(p?.threads.map(String.init) ?? "")
             case .user: set(p?.user ?? "")
             case .responsible:
-                if let p, let r = p.responsible {
+                if let p, let t = p.leftBehindText {
+                    set("† \(t)"); color = .systemOrange
+                } else if let p, let r = p.responsible {
                     if r == p.pid { set("self"); color = .secondaryLabelColor }
                     else if let rp = procs[r] { set("\(rp.name) (\(r))") }
                     else { set("† gone (\(r))"); color = .systemOrange }
@@ -543,7 +545,7 @@ struct ProcessOutline: NSViewRepresentable {
                 return
             }
             set(image: IconCache.icon(for: p) ?? Self.terminalIcon, tint: nil)
-            let orphan = p.responsible.map { $0 != p.pid && procs[$0] == nil } ?? false
+            let orphan = p.leftBehindGroup != nil
             let color: NSColor = p.isZombie || !p.isInspectable ? .secondaryLabelColor : orphan ? .systemOrange : .labelColor
             let s = NSMutableAttributedString(string: n.title, attributes: [.font: Self.body, .foregroundColor: color])
             func badge(_ t: String, _ c: NSColor) {

@@ -40,6 +40,15 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     var signer: String?
     var signID: String?
     var viaHelper = false              // metrics came from the root helper
+    /// Set when this process outlived the app that launched it (see Store.ghosts): the Left Behind
+    /// group's id, and the app's name and pid where known.
+    var leftBehindGroup: Int?
+    var leftBehindApp: String?
+    var leftBehindPid: pid_t?
+    var leftBehindText: String? {
+        guard leftBehindGroup != nil else { return nil }
+        return "\(leftBehindApp ?? "exited app") (\(leftBehindPid.map { "pid \($0)" } ?? "previous instance"))"
+    }
 
     var key: String { "\(pid):\(start.timeIntervalSince1970)" }
     var name: String {
@@ -59,8 +68,12 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
 }
 
 struct Ghost: Identifiable, Sendable {
-    var id: pid_t { deadPid }
-    var deadPid: pid_t
+    /// Also the row id of this group in the Responsible tree: -pid - 1 for a known dead pid, below
+    /// -1,000,000 for a previous instance known only by its coalition (process ids are >= 0, pids < 100,000).
+    var id: Int
+    /// nil when LaunchServices only tells us the coalition of an earlier instance, not its pid.
+    var deadPid: pid_t?
+    var detail: String { deadPid.map { "exited pid \($0)" } ?? "previous instance" }
     var name: String
     var lsApp: LSApp?
     var survivors: [ProcInfo]
@@ -247,7 +260,9 @@ final class Store {
             // Ask the helper first, but collect local data while it answers; the snapshot waits for the
             // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
             let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
-            let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs)
+            var marked = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs)
+            Self.markLeftBehind(&marked.procs, lsApps: marked.ls)
+            let snap = marked
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             await MainActor.run {
                 self.refreshError = snap.error
@@ -412,6 +427,19 @@ final class Store {
     /// Processes whose responsible process is gone — e.g. helpers an app left behind when it quit.
     var ghosts: [Ghost] { Self.ghosts(procs: procs, lsApps: lsApps) }
 
+    /// Tags every survivor of a Left Behind group with its dead app, so the LEFT badge, the Responsible
+    /// column and the Responsible tree agree with the Left Behind section. On macOS 27 a leftover reports
+    /// itself as its own responsible process, so "responsible pid is dead" alone no longer finds it.
+    nonisolated static func markLeftBehind(_ procs: inout [pid_t: ProcInfo], lsApps: [LSApp]) {
+        for g in ghosts(procs: procs, lsApps: lsApps) {
+            for s in g.survivors {
+                procs[s.pid]?.leftBehindGroup = g.id
+                procs[s.pid]?.leftBehindApp = g.name
+                procs[s.pid]?.leftBehindPid = g.deadPid
+            }
+        }
+    }
+
     /// For the sidebar badge: a stored value that is only written when it changes, so the sidebar
     /// doesn't re-render on every refresh.
     private(set) var ghostCount = 0
@@ -420,30 +448,49 @@ final class Store {
         if n != ghostCount { ghostCount = n }
     }
 
-    /// Two signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
-    /// `exited-with-subordinates` — survivors share its coalition. lsappinfo's `coalition:` is the
-    /// *jetsam* coalition id, so match against both ids.
+    /// Three signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
+    /// `exited-with-subordinates` — survivors share its coalition; (3) a running app lists a *different*
+    /// coalition under relatedCoalitionIDs — an earlier instance's, whose processes outlived it (LaunchServices
+    /// drops the exited entry once the app is launched again). lsappinfo's `coalition:` is the *jetsam*
+    /// coalition id, so match against both ids. On macOS 27 a leftover reports itself as its own
+    /// responsible process, so (1) rarely fires; (2) and (3) do the work.
     nonisolated static func ghosts(procs: [pid_t: ProcInfo], lsApps: [LSApp]) -> [Ghost] {
-        var survivors: [pid_t: [pid_t: ProcInfo]] = [:]   // dead pid -> survivors by pid
-        for p in procs.values {
-            if let r = p.responsible, r != p.pid, procs[r] == nil { survivors[r, default: [:]][p.pid] = p }
-        }
+        var survivors: [Int: [pid_t: ProcInfo]] = [:]   // group id -> survivors by pid
+        var meta: [Int: (dead: pid_t?, name: String?, ls: LSApp?)] = [:]
         let lsByPid = Dictionary(lsApps.compactMap { a in a.pid.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
-        // LaunchServices entries marked exited-with-subordinates: survivors are found by coalition, and are
-        // merged with any found through the responsible pid for the same dead app.
+        func deadGroup(_ pid: pid_t) -> Int { -Int(pid) - 1 }
+
+        for p in procs.values {
+            if let r = p.responsible, r != p.pid, procs[r] == nil {
+                survivors[deadGroup(r), default: [:]][p.pid] = p
+                meta[deadGroup(r)] = (r, lsByPid[r]?.name, lsByPid[r])
+            }
+        }
+        // Survivors found by coalition are merged with any found through the responsible pid for the same app.
         for a in lsApps where a.exited {
             guard let pid = a.pid else { continue }
             let listed = Set(a.coalitionPIDs + a.relatedCoalitionPIDs)
             for p in procs.values where listed.contains(p.pid)
                 || (a.coalition != nil && (p.coalition == a.coalition || p.jetsamCoalition == a.coalition)) {
-                survivors[pid, default: [:]][p.pid] = p
+                survivors[deadGroup(pid), default: [:]][p.pid] = p
+            }
+            meta[deadGroup(pid)] = (pid, a.name, a)
+        }
+        for a in lsApps where !a.exited {
+            guard let own = a.coalition else { continue }
+            for prior in a.relatedCoalitionIDs where prior != own {
+                let gid = -1_000_000 - Int(prior)
+                for p in procs.values where p.jetsamCoalition == prior || p.coalition == prior {
+                    survivors[gid, default: [:]][p.pid] = p
+                }
+                meta[gid] = (nil, a.name, nil)
             }
         }
         // An exited app with nothing left running isn't "left behind".
-        return survivors.filter { !$0.value.isEmpty }.map { dead, ps in
-            let ls = lsByPid[dead]
-            return Ghost(deadPid: dead, name: ls?.name ?? "unknown (pid \(dead))", lsApp: ls,
-                         survivors: ps.values.sorted { $0.pid < $1.pid })
+        return survivors.filter { !$0.value.isEmpty }.map { gid, ps in
+            let m = meta[gid]
+            return Ghost(id: gid, deadPid: m?.dead, name: m?.name ?? "unknown (pid \(m?.dead.map(String.init) ?? "?"))",
+                         lsApp: m?.ls, survivors: ps.values.sorted { $0.pid < $1.pid })
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -468,7 +515,12 @@ final class Store {
         case .responsible:
             let lsByPid = Dictionary(lsApps.compactMap { a in a.pid.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
             var ghostIDs: [pid_t: Int] = [:]
+            var leftGroups: [Int: String] = [:]   // Left Behind group id -> title
             roots = tree(all) { p in
+                if let g = p.leftBehindGroup, let t = p.leftBehindText {
+                    leftGroups[g] = t
+                    return g
+                }
                 guard let r = p.responsible, r != p.pid else { return nil }
                 if self.procs[r] != nil { return Int(r) }
                 ghostIDs[r] = -Int(r) - 1
@@ -478,11 +530,16 @@ final class Store {
             var extra: [ProcNode] = []
             let byParent = Dictionary(grouping: roots.filter { $0.id < 0 }, by: \.id)
             roots.removeAll { $0.id < 0 }
-            for (dead, gid) in ghostIDs {
+            for (dead, gid) in ghostIDs where leftGroups[gid] == nil {
                 let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
                 let name = lsByPid[dead]?.name ?? "?"
                 extra.append(ProcNode(id: gid, proc: nil, title: "† \(name) — exited pid \(dead)",
                                       subtitle: "responsible process is gone", isGhost: true, children: kids))
+            }
+            for (gid, text) in leftGroups {
+                let kids = byParent[gid]?.flatMap { $0.children ?? [] } ?? []
+                extra.append(ProcNode(id: gid, proc: nil, title: "† \(text) — exited",
+                                      subtitle: "app is gone; these outlived it", isGhost: true, children: kids))
             }
             roots += extra
         case .coalition:

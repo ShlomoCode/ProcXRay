@@ -42,7 +42,7 @@ struct GhostsView: View {
                         HStack {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                             Text(g.name).bold()
-                            Text(verbatim: "exited pid \(g.deadPid)").foregroundStyle(.secondary)
+                            Text(verbatim: g.detail).foregroundStyle(.secondary)
                             if let a = g.lsApp, !a.stateTags.isEmpty {
                                 Text(a.stateTags.joined(separator: " ")).foregroundStyle(.red).font(.caption)
                             }
@@ -275,7 +275,7 @@ enum SelfTest {
             }
         }
         for g in Store.ghosts(procs: procs, lsApps: snap.ls) {
-            print("left behind by \(g.name) (dead pid \(g.deadPid)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
+            print("left behind by \(g.name) (\(g.detail)): \(g.survivors.map { "\($0.name)(\($0.pid))" })")
         }
         let me = getpid()
         if let p = procs[me] {

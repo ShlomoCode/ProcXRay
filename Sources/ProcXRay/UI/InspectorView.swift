@@ -168,6 +168,7 @@ struct GeneralTab: View {
         let p = proc
         let parent = store.procs[p.ppid]
         let resp: String = {
+            if let t = p.leftBehindText { return "† \(t) — exited and left this process running" }
             guard let r = p.responsible else { return "unknown" }
             if r == p.pid { return "self (\(r))" }
             if let rp = store.procs[r] { return "\(rp.name) (\(r))" }
