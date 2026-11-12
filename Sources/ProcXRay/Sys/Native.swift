@@ -21,6 +21,26 @@ enum Native {
         return unsafeBitCast(s, to: SandboxCheckFn.self)
     }()
 
+    private typealias CsopsFn = @convention(c) (pid_t, UInt32, UnsafeMutableRawPointer?, Int) -> Int32
+    private static let csopsFn: CsopsFn? = {
+        guard let s = dlsym(handle, "csops") else { return nil }
+        return unsafeBitCast(s, to: CsopsFn.self)
+    }()
+
+    /// CDHash of the code a process is running right now (csops CS_OPS_CDHASH). Unlike pid and start
+    /// time it changes on exec, so it tells whether cached signing details still describe the process.
+    /// Works for other users' processes without root; ~1 µs per call.
+    static func cdhash(_ pid: pid_t) -> String? {
+        guard let f = csopsFn else { return nil }
+        var buf = [UInt8](repeating: 0, count: 20)
+        guard f(pid, 5 /* CS_OPS_CDHASH */, &buf, buf.count) == 0 else { return nil }
+        // Runs for every process on every refresh: String(format:) per byte cost ~20 ms per snapshot.
+        let hex: [UInt8] = Array("0123456789abcdef".utf8)
+        var out = [UInt8](repeating: 0, count: 40)
+        for (i, b) in buf.enumerated() { out[2 * i] = hex[Int(b >> 4)]; out[2 * i + 1] = hex[Int(b & 0xF)] }
+        return String(decoding: out, as: UTF8.self)
+    }
+
     static let timebase: (numer: UInt64, denom: UInt64) = {
         var tb = mach_timebase_info_data_t()
         mach_timebase_info(&tb)

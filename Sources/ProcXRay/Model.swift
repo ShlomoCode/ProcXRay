@@ -51,6 +51,11 @@ struct ProcInfo: Identifiable, Hashable, Sendable {
     }
 
     var key: String { "\(pid):\(start.timeIntervalSince1970)" }
+    /// CDHash of the running code (see Native.cdhash); changes when the process execs something else.
+    var cdhash: String?
+    /// Key for signing details: pid and start time survive exec, so the running code is part of it.
+    /// Without it a process could show an Apple signature while running unsigned code it exec'd.
+    var codeKey: String { "\(key):\(cdhash ?? path ?? comm)" }
     var name: String {
         if let p = path { return (p as NSString).lastPathComponent }
         return comm
@@ -289,16 +294,22 @@ final class Store {
     /// Code-signing lookups are the slow part; do the missing ones in the background and merge.
     private func fillSignatures() {
         guard !signing else { return }
-        let missing = procs.values.filter { signCache[$0.key] == nil }.map { ($0.key, $0.pid, $0.path) }
+        let missing = procs.values.filter { signCache[$0.codeKey] == nil }.map { ($0.codeKey, $0.pid, $0.path, $0.cdhash) }
         guard !missing.isEmpty else { return }
         signing = true
         Task.detached(priority: .utility) {
             var acc: [String: SignInfo] = [:]
-            for (k, pid, path) in missing { acc[k] = CodeSign.inspect(pid: pid, path: path) }
+            for (k, pid, path, expected) in missing {
+                let info = CodeSign.inspect(pid: pid, path: path)
+                // An exec between the snapshot and this lookup: the details belong to other code. Skip;
+                // the next snapshot carries the new cdhash and asks again.
+                if let e = expected, let got = info.cdHash, e != got { continue }
+                acc[k] = info
+            }
             let found = acc
             await MainActor.run {
                 self.signCache.merge(found) { a, _ in a }
-                let live = Set(self.procs.values.map(\.key))
+                let live = Set(self.procs.values.map(\.codeKey))
                 self.signCache = self.signCache.filter { live.contains($0.key) }
                 // snapshot() already applied every older cache entry; patch only the processes that were
                 // just inspected, on a local copy, and publish once. Writing self.procs[pid] in a loop
@@ -306,7 +317,7 @@ final class Store {
                 var procs = self.procs
                 var changed = false
                 for (pid, p) in procs {
-                    guard let s = found[p.key], p.signer != s.shortSigner || p.signID != s.identifier else { continue }
+                    guard let s = found[p.codeKey], p.signer != s.shortSigner || p.signID != s.identifier else { continue }
                     procs[pid]!.signer = s.shortSigner; procs[pid]!.signID = s.identifier
                     changed = true
                 }
@@ -327,7 +338,7 @@ final class Store {
         }
     }
 
-    func signInfo(for p: ProcInfo) -> SignInfo? { signCache[p.key] }
+    func signInfo(for p: ProcInfo) -> SignInfo? { signCache[p.codeKey] }
 
     // MARK: Snapshot (off main thread)
 
@@ -379,6 +390,7 @@ final class Store {
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
             var p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: user, comm: k.comm,
                              path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
+            p.cdhash = Native.cdhash(k.pid)
             p.responsible = Native.responsible(k.pid)
             if let c = Native.coalition(k.pid) { p.coalition = c.0; p.jetsamCoalition = c.1 }
             if let ti = Native.taskInfo(k.pid) {
@@ -397,7 +409,7 @@ final class Store {
             }
             p.launchdLabel = labelByPid[k.pid]
             if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags }
-            if let s = signCache[p.key] { p.signer = s.shortSigner; p.signID = s.identifier }
+            if let s = signCache[p.codeKey] { p.signer = s.shortSigner; p.signID = s.identifier }
             out[k.pid] = p
         }
         let priv = privSource()
