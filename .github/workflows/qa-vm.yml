@@ -16,6 +16,9 @@ on:
       runner:
         description: macOS runner label
         default: macos-latest
+      hostname:
+        description: Tailscale hostname
+        default: procxray-qa
 
 permissions:
   contents: read
@@ -70,7 +73,7 @@ jobs:
       - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: procxray-qa
+          hostname: ${{ inputs.hostname }}
           log-mode: quiet
 
       - name: Stay up for QA
