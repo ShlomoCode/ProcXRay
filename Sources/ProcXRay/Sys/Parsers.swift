@@ -21,8 +21,12 @@ enum SizeText {
         case "B": mult = 1
         default: mult = 1; num += " "
         }
-        guard let v = Double(num.dropLast()) else { return nil }
-        return UInt64(v * mult)
+        let digits = num.dropLast()
+        // A plain byte count parses exactly; Double would round anything above 2^53.
+        if mult == 1, let n = UInt64(digits) { return n }
+        // Malformed or truncated output ("nan", "-1", "inf", past 2^64) is skipped, not trapped on.
+        guard let v = Double(digits), v.isFinite, v >= 0 else { return nil }
+        return UInt64(exactly: (v * mult).rounded())
     }
 }
 

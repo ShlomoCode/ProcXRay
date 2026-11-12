@@ -596,7 +596,7 @@ final class Store {
 enum Fmt {
     static func bytes(_ v: UInt64?) -> String {
         guard let v else { return "—" }
-        return ByteCountFormatter.string(fromByteCount: Int64(v), countStyle: .memory)
+        return ByteCountFormatter.string(fromByteCount: Int64(clamping: v), countStyle: .memory)
     }
     static func pct(_ v: Double?) -> String {
         guard let v else { return "—" }
