@@ -31,7 +31,8 @@ enum LSAppInfo {
     }
 
     static func parse(_ text: String) -> [LSApp] {
-        let header = try! NSRegularExpression(pattern: #"^\s*(\d+)\) "(.*)" (ASN:\S+?):?\s*$"#)
+        // `  6) "Google Chrome" ASN:0x0-0x10010: (in front)`: the frontmost app's header carries a trailing tag.
+        let header = try! NSRegularExpression(pattern: #"^\s*(\d+)\) "(.*)" (ASN:\S+?):?(?:\s+\(([^)]*)\))?\s*$"#)
         var apps: [LSApp] = []
         var cur: LSApp?
         func flush() { if let c = cur { apps.append(c) }; cur = nil }
@@ -42,6 +43,7 @@ enum LSAppInfo {
                 cur = LSApp(index: Int(ns.substring(with: m.range(at: 1))) ?? 0,
                             name: ns.substring(with: m.range(at: 2)),
                             asn: ns.substring(with: m.range(at: 3)), raw: line)
+                if m.range(at: 4).location != NSNotFound { cur?.stateTags.append(ns.substring(with: m.range(at: 4))) }
                 continue
             }
             guard var c = cur else { continue }
