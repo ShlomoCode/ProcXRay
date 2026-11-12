@@ -152,6 +152,9 @@ struct RefreshStats: View {
     var body: some View {
         Text(verbatim: "\(store.procs.count) processes")
         Text(verbatim: "snapshot \(store.refreshMillis) ms")
+        if let e = store.refreshError {
+            Text(verbatim: "\(e) — showing the last good list").foregroundStyle(.red).lineLimit(3)
+        }
     }
 }
 

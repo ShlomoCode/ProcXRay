@@ -44,20 +44,33 @@ enum Native {
         var tty: Int32
     }
 
-    static func allProcesses() -> [KProc] {
+    /// Every process, or an error message when the kernel won't list them. An empty list is never a
+    /// stand-in for failure: callers keep their last good data instead of showing "no processes".
+    static func listProcesses() -> Result<[KProc], ListError> {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var size = 0
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0 else { return [] }
-        size += size / 4
         let stride = MemoryLayout<kinfo_proc>.stride
-        var buf = [kinfo_proc](repeating: kinfo_proc(), count: size / stride)
-        guard sysctl(&mib, 4, &buf, &size, nil, 0) == 0 else { return [] }
-        let n = size / stride
-        var out: [KProc] = []
-        out.reserveCapacity(n)
-        for i in 0..<n { out.append(kproc(buf[i])) }
-        return out
+        // ENOMEM means more processes appeared between sizing the buffer and reading it: size again.
+        for _ in 0..<4 {
+            var size = 0
+            guard sysctl(&mib, 4, nil, &size, nil, 0) == 0 else { return .failure(ListError(errno)) }
+            size += size / 4
+            var buf = [kinfo_proc](repeating: kinfo_proc(), count: size / stride)
+            guard sysctl(&mib, 4, &buf, &size, nil, 0) == 0 else {
+                if errno == ENOMEM { continue }
+                return .failure(ListError(errno))
+            }
+            return .success(buf.prefix(size / stride).map(kproc))
+        }
+        return .failure(ListError(ENOMEM))
     }
+
+    struct ListError: Error, Sendable {
+        var code: Int32
+        init(_ code: Int32) { self.code = code }
+        var message: String { "process list (sysctl KERN_PROC_ALL) failed: \(String(cString: strerror(code)))" }
+    }
+
+    static func allProcesses() -> [KProc] { (try? listProcesses().get()) ?? [] }
 
     /// One process, read fresh from the kernel; nil if no process has this pid.
     static func process(_ pid: pid_t) -> KProc? {

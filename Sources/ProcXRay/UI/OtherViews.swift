@@ -229,6 +229,7 @@ struct LaunchdView: View {
 enum SelfTest {
     @MainActor static func run() {
         let snap = Store.snapshot(prevCPU: [:], signCache: [:])
+        if let e = snap.error { print(e); exit(1) }
         let procs = snap.procs
         print("processes: \(procs.count)")
         print("team id: \(HelperConfig.teamID ?? "none")  requirement: \(HelperConfig.peerRequirement)")

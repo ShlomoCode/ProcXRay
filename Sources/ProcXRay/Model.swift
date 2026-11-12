@@ -121,6 +121,8 @@ final class Store {
     var interval: Double = 2
     var lastRefresh = Date()
     var refreshMillis = 0
+    /// Why the last refresh couldn't read the process list (the table keeps the previous snapshot).
+    var refreshError: String?
 
     /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
     @ObservationIgnored private var dataGen = 0
@@ -248,6 +250,12 @@ final class Store {
             let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs)
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             await MainActor.run {
+                self.refreshError = snap.error
+                guard snap.error == nil else {
+                    // Keep showing the last good snapshot rather than an empty table.
+                    self.refreshing = false
+                    return
+                }
                 self.procs = snap.procs
                 if readSlow {
                     self.lsApps = snap.ls
@@ -323,6 +331,8 @@ final class Store {
         var ls: [LSApp]
         var jobs: [LaunchdJob]
         var cpu: [String: (UInt64, UInt64)]
+        /// Set when the process list couldn't be read; `procs` is then empty and must not be published.
+        var error: String?
     }
 
     /// `ls` / `jobs`: reuse these instead of re-reading LaunchServices / launchd (nil = read them now).
@@ -345,7 +355,12 @@ final class Store {
         var out: [pid_t: ProcInfo] = [:]
         var cpu: [String: (UInt64, UInt64)] = [:]
 
-        for k in Native.allProcesses() where k.pid >= 0 {
+        let list: [Native.KProc]
+        switch Native.listProcesses() {
+        case .success(let l): list = l
+        case .failure(let e): return Snapshot(procs: [:], ls: ls, jobs: jobs, cpu: prevCPU, error: e.message)
+        }
+        for k in list where k.pid >= 0 {
             let user = users[k.uid] ?? { let u = Native.userName(k.uid); users[k.uid] = u; return u }()
             var p = ProcInfo(pid: k.pid, ppid: k.ppid, pgid: k.pgid, uid: k.uid, user: user, comm: k.comm,
                              path: Native.path(k.pid), start: k.start, stat: k.stat, pflags: k.flags)
