@@ -3,6 +3,8 @@ import Foundation
 /// Runs as root under launchd when the binary is started with `--helper`.
 enum HelperDaemon {
     static func run() -> Never {
+        // Anything a tool writes as root stays private to root.
+        umask(0o077)
         let delegate = ListenerDelegate()
         let listener = NSXPCListener(machServiceName: HelperConfig.machService)
         // Reject any client that isn't ProcXRay signed by our team (enforced by the kernel/XPC, not by us parsing anything).
@@ -19,7 +21,7 @@ enum HelperDaemon {
 
         func listener(_ listener: NSXPCListener, shouldAcceptNewConnection c: NSXPCConnection) -> Bool {
             c.exportedInterface = NSXPCInterface(with: HelperProtocol.self)
-            c.exportedObject = Service()
+            c.exportedObject = Service(callerUID: c.effectiveUserIdentifier)
             q.sync { live += 1 }
             c.invalidationHandler = { [weak self] in self?.connectionEnded() }
             c.resume()
@@ -38,7 +40,23 @@ enum HelperDaemon {
         }
     }
 
+    /// One per connection. The helper hands a caller nothing it couldn't get on its own or with sudo:
+    /// another user's process (arguments, environment, tools) only for an admin caller.
     final class Service: NSObject, HelperProtocol {
+        private let callerUID: uid_t
+        private let callerIsAdmin: Bool
+
+        init(callerUID: uid_t) {
+            self.callerUID = callerUID
+            callerIsAdmin = Native.isAdmin(callerUID)
+        }
+
+        private func mayInspect(_ pid: Int32) -> Bool {
+            if callerIsAdmin { return true }
+            guard let p = Native.process(pid) else { return false }
+            return p.uid == callerUID && p.ruid == callerUID
+        }
+
         func version(reply: @escaping (Int, Int32) -> Void) { reply(HelperConfig.protocolVersion, getpid()) }
 
         func allMetrics(reply: @escaping (Data) -> Void) {
@@ -67,7 +85,7 @@ enum HelperDaemon {
         }
 
         func argsEnv(pid: Int32, reply: @escaping (Data?) -> Void) {
-            guard pid > 0, let a = Native.argsEnv(pid) else { reply(nil); return }
+            guard pid > 0, mayInspect(pid), let a = Native.argsEnv(pid) else { reply(nil); return }
             let v = PrivArgsEnv(execPath: a.execPath, args: a.args, env: a.env, cwd: Native.cwd(pid))
             reply(try? JSONEncoder().encode(v))
         }
@@ -75,6 +93,10 @@ enum HelperDaemon {
         func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void) {
             guard let t = HelperTool(rawValue: tool), let (path, args) = t.argv(pid: pid) else {
                 reply("helper: rejected tool \(tool) pid \(pid)")
+                return
+            }
+            guard t == .btmDump ? callerIsAdmin : mayInspect(pid) else {
+                reply("helper: only an admin user can inspect another user's processes or all background items")
                 return
             }
             reply(Shell.run(path, args))

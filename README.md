@@ -44,7 +44,9 @@ The app icon (a chip under an X-ray scan beam) is drawn in code by `tools/make-i
 The sidebar's **Install Privileged Helper…** button registers a root daemon through `SMAppService.daemon`. macOS asks you to approve it once under System Settings → General → Login Items. The helper is the same binary started by launchd as `ProcXRay --helper`.
 
 - **Read-only.** It returns task metrics for every pid and args/env/cwd for a pid, and runs a fixed allowlist of tools whose command lines it builds itself: `lsof`, `vmmap --summary`, `sample`, `launchctl procinfo` and `sfltool dumpbtm`. It never accepts paths, commands or free-form arguments.
-- **Mutual code-signing check.** The helper's XPC listener only accepts `local.procxray` signed by the same team (`setConnectionCodeSigningRequirement`), and the app only talks to a helper with that identity. The team ID is read from the binary's own signature at runtime.
+- **Mutual code-signing check, pinned to this build.** The helper's XPC listener only accepts a client that is this exact binary: identifier `local.procxray`, the same team, and the same cdhash (`setConnectionCodeSigningRequirement`). The app requires the same of the helper. Team ID and cdhash are read from the binary's own signature at runtime, so anything else signed with the same certificate is rejected. After a rebuild, a helper still running the old binary is rejected until it exits.
+- **Per-user policy.** A caller in the `admin` group (who could run the same tools with `sudo`) can inspect any process. Other users get arguments, environment and tools only for their own processes, and no `sfltool dumpbtm`.
+- **No files left behind.** `sample` writes its report to stdout instead of `/tmp`, and the helper runs with umask 077.
 - **Exits when idle.** It quits about 10 s after the last connection closes, and launchd restarts it on demand.
 - With the helper running, root-owned processes show memory, CPU, threads and arguments, and Background Items loads without a password prompt. `vmmap`/`sample` still cannot inspect Apple platform binaries (SIP).
 

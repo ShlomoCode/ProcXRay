@@ -68,6 +68,19 @@ enum Native {
         return kproc(k)
     }
 
+    /// Whether `uid` is in the admin group (gid 80), i.e. could run the same tools with sudo.
+    static func isAdmin(_ uid: uid_t) -> Bool {
+        if uid == 0 { return true }
+        guard let pw = getpwuid(uid) else { return false }
+        var n: Int32 = 64
+        var groups = [Int32](repeating: 0, count: Int(n))
+        while getgrouplist(pw.pointee.pw_name, Int32(bitPattern: pw.pointee.pw_gid), &groups, &n) == -1 {
+            n *= 2
+            groups = [Int32](repeating: 0, count: Int(n))
+        }
+        return groups.prefix(Int(n)).contains(80)
+    }
+
     private static func kproc(_ k: kinfo_proc) -> KProc {
         var k = k
         let comm = withUnsafePointer(to: &k.kp_proc.p_comm) {

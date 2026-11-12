@@ -36,6 +36,10 @@ struct ProcXRayApp: App {
             Bench.run()
             exit(0)
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--helper-call") {
+            Bench.helperCall(Array(CommandLine.arguments[(i + 1)...]))
+            exit(0)
+        }
         if CommandLine.arguments.contains("--dump") {
             SelfTest.run()
             exit(0)

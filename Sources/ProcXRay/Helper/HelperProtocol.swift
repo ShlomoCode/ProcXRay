@@ -7,23 +7,29 @@ enum HelperConfig {
     static let plistName = "local.procxray.helper.plist"
     static let bundleID = "local.procxray"
 
-    /// Our own team ID, read from this binary's signature (app and helper are the same binary).
+    /// Team ID and cdhash of this binary's signature (app and helper are the same binary).
     /// Note: an "Apple Development: Name (XXXXXXXXXX)" certificate's parenthesised ID is NOT the team ID.
-    static let teamID: String? = {
+    private static let signature: (team: String, cdhash: String)? = {
         var me: SecCode?
         guard SecCodeCopySelf([], &me) == errSecSuccess, let me else { return nil }
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(unsafeBitCast(me, to: SecStaticCode.self),
-                                            SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess
+                                            SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let d = info as? [String: Any],
+              let team = d[kSecCodeInfoTeamIdentifier as String] as? String,
+              let unique = d[kSecCodeInfoUnique as String] as? Data
         else { return nil }
-        return (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String
+        return (team, unique.map { String(format: "%02x", $0) }.joined())
     }()
+    static var teamID: String? { signature?.team }
 
-    /// Both sides require the peer to be ProcXRay signed by our own team. Unsigned/ad-hoc builds get an
-    /// unsatisfiable requirement, so the helper can never be driven by unsigned code.
+    /// Both sides require the peer to be this exact binary: same identifier and team, and the same cdhash.
+    /// The cdhash pin is what matters — identifier and team alone would admit anything else signed with
+    /// the same certificate. Unsigned/ad-hoc builds get an unsatisfiable requirement, so the helper can
+    /// never be driven by unsigned code.
     static var peerRequirement: String {
-        guard let t = teamID else { return #"identifier "never.matches" and anchor apple"# }
-        return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(t)""#
+        guard let s = signature else { return #"identifier "never.matches" and anchor apple"# }
+        return #"identifier "\#(bundleID)" and anchor apple generic and certificate leaf[subject.OU] = "\#(s.team)" and cdhash H"\#(s.cdhash)""#
     }
     /// Bumped whenever the XPC interface changes.
     static let protocolVersion = 1
@@ -45,7 +51,8 @@ enum HelperTool: Int, CaseIterable {
         switch self {
         case .lsof: return pid > 0 ? ("/usr/sbin/lsof", ["-n", "-P", "-p", "\(pid)"]) : nil
         case .vmmap: return pid > 0 ? ("/usr/bin/vmmap", ["--summary", "\(pid)"]) : nil
-        case .sample: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "1", "-mayDie"]) : nil
+        // Without -file, sample also writes its report to /tmp (as root, world-readable when run by the helper).
+        case .sample: return pid > 0 ? ("/usr/bin/sample", ["\(pid)", "1", "-mayDie", "-file", "/dev/stdout"]) : nil
         case .launchctlProcinfo: return pid > 0 ? ("/bin/launchctl", ["procinfo", "\(pid)"]) : nil
         case .btmDump: return ("/usr/bin/sfltool", ["dumpbtm"])
         }
