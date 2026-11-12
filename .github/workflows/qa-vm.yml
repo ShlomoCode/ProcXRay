@@ -41,7 +41,8 @@ jobs:
           ditto build/ProcXRay.app /Applications/ProcXRay.app
 
       - name: Install agent-desktop
-        run: brew install agent-desktop
+        # The runner image's formula index predates agent-desktop.
+        run: brew update --quiet && brew install agent-desktop
 
       - name: Grant Accessibility and Screen Recording to SSH sessions and agent-desktop
         run: |
