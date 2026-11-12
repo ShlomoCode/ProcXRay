@@ -76,10 +76,18 @@ jobs:
           hostname: ${{ inputs.hostname }}
           log-mode: quiet
 
+      - name: Keep the machine awake
+        run: |
+          sudo pmset -a sleep 0 displaysleep 0 disksleep 0 powernap 0 || true
+          nohup caffeinate -dimsu >/dev/null 2>&1 &
+
       - name: Stay up for QA
         env:
           MINUTES: ${{ inputs.minutes }}
         run: |
           echo "ssh -i ~/.ssh/procxray-qa $(whoami)@procxray-qa"
           end=$(( $(date +%s) + MINUTES * 60 ))
-          while [ "$(date +%s)" -lt "$end" ] && [ ! -e ~/qa-done ]; do sleep 30; done
+          while [ "$(date +%s)" -lt "$end" ] && [ ! -e ~/qa-done ]; do
+            echo "$(date +%T) load=$(sysctl -n vm.loadavg) free=$(memory_pressure -Q 2>/dev/null | tail -1)"
+            sleep 60
+          done
