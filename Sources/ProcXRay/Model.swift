@@ -242,8 +242,10 @@ final class Store {
         if Date().timeIntervalSince(lastProbe) > 10 { probeHelper() }
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
-            let priv = useHelper ? HelperClient.shared.allMetrics() : nil
-            let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: priv, ls: ls, jobs: jobs)
+            // Ask the helper first, but collect local data while it answers; the snapshot waits for the
+            // helper only after that, and never longer than helperBudget (it normally takes ~10 ms).
+            let priv = useHelper ? Pending { HelperClient.shared.allMetrics(timeout: Self.helperBudget) } : nil
+            let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: { priv?.wait() }, ls: ls, jobs: jobs)
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             await MainActor.run {
                 self.procs = snap.procs
@@ -306,6 +308,16 @@ final class Store {
 
     // MARK: Snapshot (off main thread)
 
+    /// A value computed on a background queue, collected later with wait().
+    final class Pending<T: Sendable>: @unchecked Sendable {
+        private var value: T?
+        private let done = DispatchSemaphore(value: 0)
+        init(_ work: @escaping @Sendable () -> T?) {
+            DispatchQueue.global(qos: .userInitiated).async { self.value = work(); self.done.signal() }
+        }
+        func wait() -> T? { done.wait(); done.signal(); return value }
+    }
+
     struct Snapshot: Sendable {
         var procs: [pid_t: ProcInfo]
         var ls: [LSApp]
@@ -314,8 +326,12 @@ final class Store {
     }
 
     /// `ls` / `jobs`: reuse these instead of re-reading LaunchServices / launchd (nil = read them now).
+    /// Longest a refresh waits for the helper's metrics; under the 2 s refresh interval.
+    nonisolated static let helperBudget = 1.5
+
+    /// `priv`: helper metrics, asked for only after the local pass so a slow helper delays just the merge.
     nonisolated static func snapshot(prevCPU: [String: (UInt64, UInt64)], signCache: [String: SignInfo],
-                                     priv: [Int32: PrivMetrics]? = nil,
+                                     priv privSource: () -> [Int32: PrivMetrics]? = { nil },
                                      ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil) -> Snapshot {
         let ls = ls ?? LSAppInfo.list()
         let jobs = jobs ?? Launchd.list()
@@ -349,7 +365,14 @@ final class Store {
                 p.wakeups = ru.ri_pkg_idle_wkups &+ ru.ri_interrupt_wkups
                 if p.cpuNanos == nil { p.cpuNanos = Native.machToNanos(ru.ri_user_time &+ ru.ri_system_time) }
             }
-            if p.rss == nil, let m = priv?[k.pid] {
+            p.launchdLabel = labelByPid[k.pid]
+            if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags }
+            if let s = signCache[p.key] { p.signer = s.shortSigner; p.signID = s.identifier }
+            out[k.pid] = p
+        }
+        let priv = privSource()
+        for (pid, var p) in out {
+            if p.rss == nil, let m = priv?[pid] {
                 p.rss = m.rss; p.virt = m.virt; p.threads = m.threads; p.cpuNanos = m.cpuNanos
                 p.footprint = m.footprint; p.diskRead = m.diskRead; p.diskWrite = m.diskWrite
                 p.energyNJ = m.energyNJ; p.wakeups = m.wakeups
@@ -362,14 +385,8 @@ final class Store {
                 }
                 cpu[p.key] = (c, now)
             }
-            p.launchdLabel = labelByPid[k.pid]
-            if let a = lsByPid[k.pid] { p.lsAppName = a.name; p.lsTags = a.stateTags }
-            if let s = signCache[p.key] { p.signer = s.shortSigner; p.signID = s.identifier }
-            out[k.pid] = p
-        }
-        // sandbox check is cheap but noisy for zombies; do it last
-        for (pid, var p) in out where !p.isZombie {
-            p.sandboxed = Native.sandboxed(pid) ?? priv?[pid]?.sandboxed
+            // sandbox check is cheap but noisy for zombies
+            if !p.isZombie { p.sandboxed = Native.sandboxed(pid) ?? priv?[pid]?.sandboxed }
             out[pid] = p
         }
         return Snapshot(procs: out, ls: ls, jobs: jobs, cpu: cpu)

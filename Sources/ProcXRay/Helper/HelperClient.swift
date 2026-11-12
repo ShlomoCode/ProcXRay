@@ -55,8 +55,8 @@ final class HelperClient: @unchecked Sendable {
         return result
     }
 
-    func allMetrics() -> [Int32: PrivMetrics]? {
-        guard let data = call({ p, done in p.allMetrics { done($0) } }) as Data?,
+    func allMetrics(timeout: Double = 15) -> [Int32: PrivMetrics]? {
+        guard let data = call({ p, done in p.allMetrics { done($0) } }, timeout: timeout) as Data?,
               let list = try? JSONDecoder().decode([PrivMetrics].self, from: data) else { return nil }
         return Dictionary(list.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
     }
@@ -73,11 +73,14 @@ final class HelperClient: @unchecked Sendable {
     // MARK: plumbing
 
     private func call<T>(_ body: (HelperProtocol, @escaping (T) -> Void) -> Void, timeout: Double = 15) -> T? {
+        // The reply can arrive after we stopped waiting; the lock keeps that late write from racing the read.
+        let lock = NSLock()
         var out: T?
         let sem = DispatchSemaphore(value: 0)
         guard let p = proxy({ _ in sem.signal() }) else { return nil }
-        body(p) { out = $0; sem.signal() }
+        body(p) { v in lock.lock(); out = v; lock.unlock(); sem.signal() }
         _ = sem.wait(timeout: .now() + timeout)
+        lock.lock(); defer { lock.unlock() }
         return out
     }
 

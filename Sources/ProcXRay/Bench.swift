@@ -35,8 +35,8 @@ enum Bench {
         time("per-pid userName") { for p in Native.allProcesses() { _ = Native.userName(p.uid) } }
         if helper { time("helper allMetrics (XPC)") { _ = HelperClient.shared.allMetrics() } }
         let priv = helper ? HelperClient.shared.allMetrics() : nil
-        time("full snapshot()") { _ = Store.snapshot(prevCPU: [:], signCache: [:], priv: priv) }
-        let snap = Store.snapshot(prevCPU: [:], signCache: [:], priv: priv)
+        time("full snapshot()") { _ = Store.snapshot(prevCPU: [:], signCache: [:], priv: { priv }) }
+        let snap = Store.snapshot(prevCPU: [:], signCache: [:], priv: { priv })
         let store = Store(); store.procs = snap.procs; store.lsApps = snap.ls
         for g in Grouping.allCases {
             time("nodes(\(g.label))") {
