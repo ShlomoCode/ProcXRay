@@ -1,4 +1,5 @@
 name: QA VM
+run-name: QA VM ${{ inputs.hostname }}
 
 # A disposable macOS desktop for interactive QA: builds upstream ProcXRay, installs agent-desktop,
 # joins the tailnet as an ephemeral node and stays up so an agent can SSH in and drive the GUI.
