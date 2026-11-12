@@ -33,7 +33,7 @@ struct GhostsView: View {
                                 Text(verbatim: "started \(Fmt.age(p.start)) ago").foregroundStyle(.secondary)
                                 Spacer()
                                 Text(Fmt.bytes(p.footprint)).monospacedDigit()
-                                Button("Terminate") { _ = store.send(SIGTERM, to: p.pid); store.refresh() }
+                                Button("Terminate") { _ = store.send(SIGTERM, to: p); store.refresh() }
                                     .controlSize(.small)
                             }
                             .tag(p.pid)

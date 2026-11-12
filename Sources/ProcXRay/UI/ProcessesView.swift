@@ -21,7 +21,7 @@ struct ProcessesView: View {
     @State private var search = ""
     @State private var selection: ProcNode.ID?
     @State private var sort = [KeyPathComparator(\ProcNode.pidKey)]
-    @State private var pendingSignal: (pid_t, Int32, String)?
+    @State private var pendingSignal: (ProcInfo, Int32, String)?
 
     // This body must not read per-refresh data (store.procs, nodes): then it would re-render every tick,
     // and each re-render pushes SwiftUI's environment through every cell view of the outline. The outline
@@ -37,7 +37,7 @@ struct ProcessesView: View {
         ProcessOutline(store: store, grouping: grouping, filter: search,
                        selection: $selection, sort: $sort,
                        onOpen: { p in inspect(p) },
-                       onSignal: { pid, sig, label in pendingSignal = (pid, sig, label) })
+                       onSignal: { p, sig, label in pendingSignal = (p, sig, label) })
             // A grouping switch re-parents nearly every row; start from a fresh outline (all expanded).
             .id(grouping)
         .focusedSceneValue(\.inspectProcess, hasProcessSelected ? { inspectSelected() } : nil)
@@ -63,11 +63,11 @@ struct ProcessesView: View {
             }
         }
         .navigationTitle("Processes")
-        .confirmationDialog(pendingSignal.map { "Send \($0.2) to pid \($0.0)?" } ?? "",
+        .confirmationDialog(pendingSignal.map { "Send \($0.2) to \($0.0.name) (pid \($0.0.pid))?" } ?? "",
                             isPresented: Binding(get: { pendingSignal != nil }, set: { if !$0 { pendingSignal = nil } })) {
             Button(pendingSignal?.2 ?? "Send", role: .destructive) {
-                if let (pid, sig, _) = pendingSignal {
-                    if let err = store.send(sig, to: pid) { NSSound.beep(); print("signal failed: \(err)") }
+                if let (p, sig, _) = pendingSignal {
+                    if let err = store.send(sig, to: p) { NSSound.beep(); NSLog("signal failed: %@", err) }
                     store.refresh()
                 }
                 pendingSignal = nil

@@ -55,26 +55,37 @@ enum Native {
         let n = size / stride
         var out: [KProc] = []
         out.reserveCapacity(n)
-        for i in 0..<n {
-            var k = buf[i]
-            let comm = withUnsafePointer(to: &k.kp_proc.p_comm) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN) + 1) { String(cString: $0) }
-            }
-            let st = k.kp_proc.p_un.__p_starttime
-            out.append(KProc(
-                pid: k.kp_proc.p_pid,
-                ppid: k.kp_eproc.e_ppid,
-                pgid: k.kp_eproc.e_pgid,
-                uid: k.kp_eproc.e_ucred.cr_uid,
-                ruid: k.kp_eproc.e_pcred.p_ruid,
-                comm: comm,
-                start: Date(timeIntervalSince1970: Double(st.tv_sec) + Double(st.tv_usec) / 1e6),
-                stat: Int8(bitPattern: UInt8(k.kp_proc.p_stat)),
-                flags: k.kp_proc.p_flag,
-                tty: k.kp_eproc.e_tdev
-            ))
-        }
+        for i in 0..<n { out.append(kproc(buf[i])) }
         return out
+    }
+
+    /// One process, read fresh from the kernel; nil if no process has this pid.
+    static func process(_ pid: pid_t) -> KProc? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var k = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, 4, &k, &size, nil, 0) == 0, size > 0, k.kp_proc.p_pid == pid else { return nil }
+        return kproc(k)
+    }
+
+    private static func kproc(_ k: kinfo_proc) -> KProc {
+        var k = k
+        let comm = withUnsafePointer(to: &k.kp_proc.p_comm) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN) + 1) { String(cString: $0) }
+        }
+        let st = k.kp_proc.p_un.__p_starttime
+        return KProc(
+            pid: k.kp_proc.p_pid,
+            ppid: k.kp_eproc.e_ppid,
+            pgid: k.kp_eproc.e_pgid,
+            uid: k.kp_eproc.e_ucred.cr_uid,
+            ruid: k.kp_eproc.e_pcred.p_ruid,
+            comm: comm,
+            start: Date(timeIntervalSince1970: Double(st.tv_sec) + Double(st.tv_usec) / 1e6),
+            stat: Int8(bitPattern: UInt8(k.kp_proc.p_stat)),
+            flags: k.kp_proc.p_flag,
+            tty: k.kp_eproc.e_tdev
+        )
     }
 
     // MARK: Per-pid info

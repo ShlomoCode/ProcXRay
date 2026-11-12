@@ -548,8 +548,14 @@ final class Store {
 
     // MARK: Actions
 
-    func send(_ sig: Int32, to pid: pid_t) -> String? {
-        kill(pid, sig) == 0 ? nil : String(cString: strerror(errno))
+    /// Signals `p` only if its pid still belongs to the same process (same start time): the pid may have
+    /// been reused since the row or dialog showed it. Refuses pid <= 0: kill(0, …) signals ProcXRay's own
+    /// process group and kill(-n, …) a whole group, never the kernel_task row the user clicked.
+    func send(_ sig: Int32, to p: ProcInfo) -> String? {
+        guard p.pid > 0 else { return "pid \(p.pid) can't be signalled" }
+        guard let live = Native.process(p.pid) else { return "process \(p.pid) has exited" }
+        guard live.start == p.start else { return "pid \(p.pid) now belongs to a different process" }
+        return kill(p.pid, sig) == 0 ? nil : String(cString: strerror(errno))
     }
 }
 

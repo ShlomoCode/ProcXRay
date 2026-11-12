@@ -14,7 +14,7 @@ struct ProcessOutline: NSViewRepresentable {
     @Binding var selection: ProcNode.ID?
     @Binding var sort: [KeyPathComparator<ProcNode>]
     let onOpen: (ProcInfo) -> Void
-    let onSignal: (pid_t, Int32, String) -> Void
+    let onSignal: (ProcInfo, Int32, String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -404,11 +404,14 @@ struct ProcessOutline: NSViewRepresentable {
             }
             add("Properties") { parent.onOpen(p) }
             menu.addItem(.separator())
-            add("Terminate (SIGTERM)") { parent.onSignal(p.pid, SIGTERM, "SIGTERM") }
-            add("Kill (SIGKILL)") { parent.onSignal(p.pid, SIGKILL, "SIGKILL") }
-            add("Suspend (SIGSTOP)") { parent.onSignal(p.pid, SIGSTOP, "SIGSTOP") }
-            add("Resume (SIGCONT)") { _ = kill(p.pid, SIGCONT) }
-            menu.addItem(.separator())
+            // No signals for kernel_task (pid 0): kill(0, …) would hit ProcXRay's own process group.
+            if p.pid > 0 {
+                add("Terminate (SIGTERM)") { parent.onSignal(p, SIGTERM, "SIGTERM") }
+                add("Kill (SIGKILL)") { parent.onSignal(p, SIGKILL, "SIGKILL") }
+                add("Suspend (SIGSTOP)") { parent.onSignal(p, SIGSTOP, "SIGSTOP") }
+                add("Resume (SIGCONT)") { _ = parent.store.send(SIGCONT, to: p) }
+                menu.addItem(.separator())
+            }
             if let path = p.path {
                 add("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
                 add("Copy Path") { Self.copy(path) }
