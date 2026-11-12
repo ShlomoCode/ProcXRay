@@ -191,17 +191,85 @@ enum Native {
 }
 
 /// Runs a command-line tool and returns stdout (stderr merged when requested).
+/// Every run is bounded: a tool that hangs is killed at `timeout`, output past `maxBytes` is dropped, and a
+/// background child that inherited the pipe can't keep the call waiting after the tool itself has exited.
 enum Shell {
-    static func run(_ path: String, _ args: [String], mergeStderr: Bool = true) -> String {
+    struct Result: Sendable {
+        var output: String
+        /// Exit status; -1 if the tool couldn't be started.
+        var status: Int32
+        var timedOut = false
+        var truncated = false
+        var ok: Bool { status == 0 && !timedOut }
+
+        /// Output plus a note about the time limit or the output cap, if either was hit.
+        var annotated: String {
+            var s = output
+            if truncated { s += "\n\n— Output truncated." }
+            if timedOut { s += "\n\n— Stopped: the tool ran past its time limit." }
+            return s
+        }
+    }
+
+    static func run(_ path: String, _ args: [String], mergeStderr: Bool = true, timeout: Double = 60) -> String {
+        exec(path, args, mergeStderr: mergeStderr, timeout: timeout).annotated
+    }
+
+    /// `timeout`: SIGTERM the tool after this many seconds, SIGKILL it 2 s later if it's still running.
+    /// `maxBytes`: stop reading and terminate the tool once it has written this much.
+    static func exec(_ path: String, _ args: [String], mergeStderr: Bool = true,
+                     timeout: Double = 60, maxBytes: Int = 64 << 20) -> Result {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = mergeStderr ? pipe : FileHandle.nullDevice
-        do { try p.run() } catch { return "failed to run \(path): \(error)" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        do { try p.run() } catch { return Result(output: "failed to run \(path): \(error)", status: -1) }
+        let pid = p.processIdentifier
+        func stop() {
+            guard p.isRunning else { return }
+            kill(pid, SIGTERM)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { if p.isRunning { kill(pid, SIGKILL) } }
+        }
+
+        let fd = pipe.fileHandleForReading.fileDescriptor
+        let start = DispatchTime.now()
+        var exitedAt: DispatchTime?
+        var data = Data()
+        var timedOut = false, truncated = false
+        var buf = [UInt8](repeating: 0, count: 64 << 10)
+        reading: while true {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pfd, 1, 100)
+            if ready > 0 {
+                let n = read(fd, &buf, buf.count)
+                if n == 0 { break }                                   // EOF: every writer closed the pipe
+                if n < 0 { if errno == EINTR { continue }; break }
+                let room = maxBytes - data.count
+                data.append(contentsOf: buf.prefix(min(n, room)))
+                if n > room { truncated = true; stop(); break }
+                continue
+            }
+            if ready < 0 && errno != EINTR { break }
+            let now = DispatchTime.now()
+            if !timedOut, now.uptimeNanoseconds - start.uptimeNanoseconds > UInt64(timeout * 1e9) {
+                timedOut = true
+                stop()
+            }
+            if p.isRunning { continue }
+            // The tool has exited but the pipe is still open: a background child inherited it.
+            // Give buffered output a moment, then stop waiting for that child.
+            if let e = exitedAt {
+                if now.uptimeNanoseconds - e.uptimeNanoseconds > 300_000_000 { break reading }
+            } else {
+                exitedAt = now
+            }
+        }
         p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
+        // Cut at the last newline so a truncated report doesn't end mid-line or mid-character.
+        if truncated, let nl = data.lastIndex(of: 0x0A) { data = data[..<nl] }
+        return Result(output: String(decoding: data, as: UTF8.self), status: p.terminationStatus,
+                      timedOut: timedOut, truncated: truncated)
     }
 }

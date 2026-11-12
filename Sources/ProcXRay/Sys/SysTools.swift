@@ -27,7 +27,7 @@ struct LSApp: Identifiable, Hashable, Sendable {
 
 enum LSAppInfo {
     static func list() -> [LSApp] {
-        parse(Shell.run("/usr/bin/lsappinfo", ["list"]))
+        parse(Shell.run("/usr/bin/lsappinfo", ["list"], timeout: 10))
     }
 
     static func parse(_ text: String) -> [LSApp] {
@@ -134,7 +134,8 @@ struct BTMItem: Identifiable, Hashable, Sendable {
 enum BTM {
     /// NOTE: sfltool requests `system.privilege.admin` (password prompt) on every run.
     /// Never call this automatically — only from an explicit user action.
-    static func dump() -> [BTMItem] { parse(Shell.run("/usr/bin/sfltool", ["dumpbtm"])) }
+    // Long limit: sfltool waits for the user to type an admin password.
+    static func dump() -> [BTMItem] { parse(Shell.run("/usr/bin/sfltool", ["dumpbtm"], timeout: 300)) }
 
     static func parse(_ text: String) -> [BTMItem] {
         var items: [BTMItem] = []
@@ -184,7 +185,7 @@ struct LaunchdJob: Identifiable, Hashable, Sendable {
 
 enum Launchd {
     static func list() -> [LaunchdJob] {
-        Shell.run("/bin/launchctl", ["list"], mergeStderr: false)
+        Shell.run("/bin/launchctl", ["list"], mergeStderr: false, timeout: 10)
             .split(separator: "\n").dropFirst().compactMap { line in
                 let p = line.split(separator: "\t", maxSplits: 2).map(String.init)
                 guard p.count == 3 else { return nil }
@@ -194,9 +195,9 @@ enum Launchd {
 
     static func printJob(_ label: String) -> String {
         let domain = "gui/\(getuid())/\(label)"
-        let out = Shell.run("/bin/launchctl", ["print", domain])
+        let out = Shell.run("/bin/launchctl", ["print", domain], timeout: 10)
         if out.contains("Could not find service") {
-            return Shell.run("/bin/launchctl", ["print", "system/\(label)"])
+            return Shell.run("/bin/launchctl", ["print", "system/\(label)"], timeout: 10)
         }
         return out
     }

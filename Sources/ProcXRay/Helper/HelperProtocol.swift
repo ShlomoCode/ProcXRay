@@ -57,6 +57,18 @@ enum HelperTool: Int, CaseIterable {
         case .btmDump: return ("/usr/bin/sfltool", ["dumpbtm"])
         }
     }
+
+    /// Seconds before the helper kills the tool. Under HelperClient.run's 60 s wait, so the reply still arrives.
+    var timeout: Double {
+        switch self {
+        case .sample: 45   // 1 s of sampling, then symbolication: ~13 s for a 39-thread daemon
+        case .vmmap, .btmDump: 30
+        case .lsof: 20
+        case .launchctlProcinfo: 10
+        }
+    }
+    /// Output beyond this is dropped: it goes back as one XPC reply and the app parses all of it.
+    static let maxOutput = 8 << 20
 }
 
 struct PrivMetrics: Codable, Sendable {

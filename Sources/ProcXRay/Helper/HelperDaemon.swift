@@ -99,7 +99,7 @@ enum HelperDaemon {
                 reply("helper: only an admin user can inspect another user's processes or all background items")
                 return
             }
-            reply(Shell.run(path, args))
+            reply(Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput).annotated)
         }
     }
 }

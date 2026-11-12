@@ -64,7 +64,7 @@ struct InspectorView: View {
                                command: {
                                    // Full path on purpose: zsh has a `log` builtin that silently shadows /usr/bin/log.
                                    Shell.run("/usr/bin/log", ["show", "--last", "10m", "--style", "compact", "--info",
-                                       "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""])
+                                       "--predicate", "processID == \(pid) OR eventMessage CONTAINS \"\(pid)\""], timeout: 120)
                                },
                                parse: LogParser.parse, isEmpty: \.isEmpty) { LogView(entries: $0, filter: $1) }
                 case .launch: LaunchTab(proc: proc)
@@ -93,7 +93,7 @@ struct InspectorView: View {
                 guard let (path, args) = tool.argv(pid: pid) else {
                     return "\(tool) can't inspect pid \(pid) (kernel_task is not a user-space process)."
                 }
-                out = Shell.run(path, args)
+                out = Shell.run(path, args, timeout: tool.timeout)
             }
             let failed = out.isEmpty || out.contains("not permitted") || out.contains("Unable to") || out.contains("failed")
             if failed && tool != .lsof {
