@@ -44,6 +44,12 @@ enum Bench {
                 _ = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.pidKey)])
             }
         }
+        for g in Grouping.allCases {
+            time("nodes(\(g.label), memory)") {
+                store.procs = snap.procs
+                _ = store.nodes(grouping: g, filter: "", sort: [KeyPathComparator(\ProcNode.memKey, order: .reverse)])
+            }
+        }
         time("ghosts()") { _ = Store.ghosts(procs: snap.procs, lsApps: snap.ls) }
         let one = Array(snap.procs.values.prefix(50))
         time("CodeSign.inspect x50") { for p in one { _ = CodeSign.inspect(pid: p.pid, path: p.path) } }

@@ -87,8 +87,10 @@ struct ProcNode: Identifiable, Sendable {
 
     var nameKey: String { title.lowercased() }
     var pidKey: Int { proc.map { Int($0.pid) } ?? Int(Int32.max) }
-    var cpuKey: Double { proc?.cpuPercent ?? children?.reduce(0) { $0 + $1.cpuKey } ?? 0 }
-    var memKey: UInt64 { proc?.footprint ?? children?.reduce(0) { $0 + $1.memKey } ?? 0 }
+    /// Own value, or the subtree total for rows without a process. Filled in by `Store.sorted`:
+    /// computing it on read re-walked the whole subtree on every sort comparison.
+    var cpuKey: Double = 0
+    var memKey: UInt64 = 0
     var userKey: String { proc?.user ?? "" }
     var signerKey: String { proc?.signer ?? "" }
     var threadsKey: Int32 { proc?.threads ?? 0 }
@@ -524,8 +526,15 @@ final class Store {
     /// Ties are broken by row id. Without that, rows that tie (every group row has the same pidKey)
     /// kept Dictionary iteration order, which reshuffles whenever a process comes or goes; the table then
     /// saw hundreds of moved rows per refresh and spent seconds rebuilding and re-measuring row views.
+    /// Children are sorted first so each node's cpuKey/memKey (subtree totals) is set before it is compared.
     private func sorted(_ nodes: [ProcNode], _ sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
-        nodes.sorted { a, b in
+        nodes.map { n in
+            var m = n
+            m.children = n.children.map { sorted($0, sort) }
+            m.cpuKey = n.proc?.cpuPercent ?? m.children?.reduce(0) { $0 + $1.cpuKey } ?? 0
+            m.memKey = n.proc?.footprint ?? m.children?.reduce(0) { $0 + $1.memKey } ?? 0
+            return m
+        }.sorted { a, b in
             for c in sort {
                 switch c.compare(a, b) {
                 case .orderedAscending: return true
@@ -534,10 +543,6 @@ final class Store {
                 }
             }
             return a.id < b.id
-        }.map { n in
-            var m = n
-            if let c = n.children { m.children = sorted(c, sort) }
-            return m
         }
     }
 
