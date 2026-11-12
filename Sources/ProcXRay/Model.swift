@@ -1,5 +1,7 @@
+import AppKit
 import Darwin
 import Foundation
+import Observation
 import SwiftUI
 
 struct ProcInfo: Identifiable, Hashable, Sendable {
@@ -106,33 +108,71 @@ struct ProcNode: Identifiable, Sendable {
 }
 
 @MainActor
-final class Store: ObservableObject {
-    @Published var procs: [pid_t: ProcInfo] = [:] { didSet { dataGen &+= 1 } }
-    @Published var lsApps: [LSApp] = [] { didSet { dataGen &+= 1 } }
-    @Published var jobs: [LaunchdJob] = []
-    @Published var btm: [BTMItem] = []
-    @Published var btmLoading = false
-    @Published var paused = false
-    @Published var interval: Double = 2
-    @Published var lastRefresh = Date()
-    @Published var refreshMillis = 0
+@Observable
+final class Store {
+    var procs: [pid_t: ProcInfo] = [:] { didSet { dataGen &+= 1 } }
+    var lsApps: [LSApp] = [] { didSet { dataGen &+= 1 } }
+    var jobs: [LaunchdJob] = []
+    var btm: [BTMItem] = []
+    var btmLoading = false
+    var paused = false
+    var interval: Double = 2
+    var lastRefresh = Date()
+    var refreshMillis = 0
 
     /// Bumped whenever an input of nodes() changes, so the table's tree is only rebuilt when needed.
-    private var dataGen = 0
-    private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>], nodes: [ProcNode])?
+    @ObservationIgnored private var dataGen = 0
+    /// Bumps each time nodes() actually rebuilds, so views can skip work when it returned the cached tree.
+    @ObservationIgnored private(set) var nodesVersion = 0
+    @ObservationIgnored private var nodesCache: (gen: Int, grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>], nodes: [ProcNode])?
 
     private(set) var signCache: [String: SignInfo] = [:]
-    private var prevCPU: [String: (UInt64, UInt64)] = [:]   // key -> (cpuNanos, wall uptime nanos)
-    private var timer: Timer?
-    private var refreshing = false
-    private var signing = false
-    @Published var helperState: HelperClient.State = .notInstalled
-    @Published var helperError: String?
-    private var lastProbe = Date.distantPast
+    @ObservationIgnored private var prevCPU: [String: (UInt64, UInt64)] = [:]   // key -> (cpuNanos, wall uptime nanos)
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var refreshing = false
+    @ObservationIgnored private var signing = false
+    var helperState: HelperClient.State = .notInstalled
+    var helperError: String?
+    @ObservationIgnored private var lastProbe = Date.distantPast
 
     init() {
         probeHelper()
         refresh()
+        schedule()
+        let names: [Notification.Name] = [
+            NSWindow.didChangeOcclusionStateNotification, NSWindow.willCloseNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+            NSApplication.didHideNotification, NSApplication.didUnhideNotification,
+            NSApplication.didChangeOcclusionStateNotification,
+        ]
+        visibilityObservers = names.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                // Let a closing/miniaturizing window finish changing state before reading it.
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.visibilityChanged() } }
+            }
+        }
+    }
+
+    /// Whether any of our windows is on screen. Hidden, minimized, closed, fully covered, on another
+    /// Space or behind a locked screen all count as off screen; nothing is refreshed then, so the app
+    /// costs ~0 while it sits in the background.
+    @ObservationIgnored private(set) var onScreen = true
+    @ObservationIgnored private var visibilityObservers: [NSObjectProtocol] = []
+
+    private func visibilityChanged() {
+        let visible = !NSApp.isHidden && NSApp.windows.contains {
+            $0.isVisible && !$0.isMiniaturized && $0.occlusionState.contains(.visible)
+        }
+        guard visible != onScreen else { return }
+        onScreen = visible
+        if ProcessInfo.processInfo.environment["PROCXRAY_DEBUG"] != nil { NSLog("ProcXRay on screen: %d", visible ? 1 : 0) }
+        if visible {
+            // A CPU % averaged over the whole off-screen stretch would be misleading: start a fresh
+            // baseline and take the second sample shortly after so the column fills in quickly.
+            prevCPU = [:]
+            refresh()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.refresh(full: false) }
+        }
         schedule()
     }
 
@@ -168,31 +208,49 @@ final class Store: ObservableObject {
 
     func schedule() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        timer = nil
+        guard onScreen else { return }
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.paused else { return }
-                self.refresh()
+                self.refresh(full: false)
             }
         }
+        t.tolerance = interval * 0.2   // lets the system coalesce our wakeups with others
+        RunLoop.main.add(t, forMode: .default)   // as before: no refreshes mid-scroll or while a menu is open
+        timer = t
     }
 
-    func refresh() {
+    /// LaunchServices and launchd state changes rarely and costs two subprocess spawns to read
+    /// (`lsappinfo` alone is ~25 ms of CPU plus work in launchservicesd), so timer ticks re-read it only
+    /// every `slowEvery` ticks. Manual refreshes and coming back on screen always read everything.
+    private static let slowEvery = 5
+    @ObservationIgnored private var ticksSinceSlow = 0
+
+    func refresh(full: Bool = true) {
         guard !refreshing else { return }
         refreshing = true
         let prev = prevCPU
         let cache = signCache
         let useHelper = helperState.isRunning
+        let readSlow = full || ticksSinceSlow + 1 >= Self.slowEvery || lsApps.isEmpty
+        ticksSinceSlow = readSlow ? 0 : ticksSinceSlow + 1
+        let ls = readSlow ? nil : lsApps
+        let jobs = readSlow ? nil : self.jobs
         if Date().timeIntervalSince(lastProbe) > 10 { probeHelper() }
         Task.detached(priority: .userInitiated) {
             let t0 = DispatchTime.now().uptimeNanoseconds
             let priv = useHelper ? HelperClient.shared.allMetrics() : nil
-            let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: priv)
+            let snap = Self.snapshot(prevCPU: prev, signCache: cache, priv: priv, ls: ls, jobs: jobs)
             let ms = Int((DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000)
             await MainActor.run {
                 self.procs = snap.procs
-                self.lsApps = snap.ls
-                self.jobs = snap.jobs
+                if readSlow {
+                    self.lsApps = snap.ls
+                    self.jobs = snap.jobs
+                }
                 self.prevCPU = snap.cpu
+                self.updateGhostCount()
                 self.lastRefresh = Date()
                 self.refreshMillis = ms
                 self.refreshing = false
@@ -253,10 +311,12 @@ final class Store: ObservableObject {
         var cpu: [String: (UInt64, UInt64)]
     }
 
+    /// `ls` / `jobs`: reuse these instead of re-reading LaunchServices / launchd (nil = read them now).
     nonisolated static func snapshot(prevCPU: [String: (UInt64, UInt64)], signCache: [String: SignInfo],
-                                     priv: [Int32: PrivMetrics]? = nil) -> Snapshot {
-        let ls = LSAppInfo.list()
-        let jobs = Launchd.list()
+                                     priv: [Int32: PrivMetrics]? = nil,
+                                     ls: [LSApp]? = nil, jobs: [LaunchdJob]? = nil) -> Snapshot {
+        let ls = ls ?? LSAppInfo.list()
+        let jobs = jobs ?? Launchd.list()
         var labelByPid: [pid_t: String] = [:]
         for j in jobs { if let p = j.pid { labelByPid[p] = j.label } }
         var lsByPid: [pid_t: LSApp] = [:]
@@ -318,6 +378,14 @@ final class Store: ObservableObject {
     /// Processes whose responsible process is gone — e.g. helpers an app left behind when it quit.
     var ghosts: [Ghost] { Self.ghosts(procs: procs, lsApps: lsApps) }
 
+    /// For the sidebar badge: a stored value that is only written when it changes, so the sidebar
+    /// doesn't re-render on every refresh.
+    private(set) var ghostCount = 0
+    private func updateGhostCount() {
+        let n = ghosts.count
+        if n != ghostCount { ghostCount = n }
+    }
+
     /// Two signals: (1) responsible pid points at a dead process; (2) LaunchServices marks an app
     /// `exited-with-subordinates` — survivors share its coalition. lsappinfo's `coalition:` is the
     /// *jetsam* coalition id, so match against both ids.
@@ -348,6 +416,7 @@ final class Store: ObservableObject {
         if let c = nodesCache, c.gen == dataGen, c.grouping == grouping, c.filter == filter, c.sort == sort { return c.nodes }
         let out = buildNodes(grouping: grouping, filter: filter, sort: sort)
         nodesCache = (dataGen, grouping, filter, sort, out)
+        nodesVersion &+= 1
         return out
     }
 
@@ -486,7 +555,7 @@ enum Fmt {
     }
     static func pct(_ v: Double?) -> String {
         guard let v else { return "—" }
-        return v < 0.05 ? "" : String(format: "%.1f", v)
+        return String(format: "%.1f", v)
     }
     static let date: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "MMM d HH:mm:ss"; return f

@@ -16,7 +16,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 }
 
 struct InspectorView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
     @AppStorage("inspectorTab") private var tab: InspectorTab = .general
 
@@ -160,7 +160,7 @@ struct KV: View {
 }
 
 struct GeneralTab: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
     @State private var cwd: String?
 
@@ -232,7 +232,7 @@ struct GeneralTab: View {
 // MARK: - Lineage
 
 struct LineageTab: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
 
     var body: some View {
@@ -276,7 +276,7 @@ struct LineageTab: View {
 // MARK: - Signature
 
 struct SignatureTab: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
     var body: some View {
         if let s = store.signInfo(for: proc) {
@@ -306,7 +306,7 @@ extension String {
 // MARK: - Args & env
 
 struct ArgsTab: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
     @State private var info: Native.ArgsEnv?
     @State private var loaded = false
@@ -412,7 +412,7 @@ struct CommandTab<Parsed, Visual: View>: View {
 }
 
 struct LaunchTab: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     let proc: ProcInfo
     @State private var ls: String?
     @State private var job: (title: String, text: String)?

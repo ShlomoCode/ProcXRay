@@ -20,7 +20,7 @@ enum Entry {
 
 struct ProcXRayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var store = Store()
+    @State private var store = Store()
 
     init() {
         if CommandLine.arguments.contains("--spawn-leftover") {
@@ -32,6 +32,10 @@ struct ProcXRayApp: App {
             print("spawned leftover sleep pid \(p.processIdentifier) from pid \(getpid())")
             exit(0)
         }
+        if CommandLine.arguments.contains("--bench") {
+            Bench.run()
+            exit(0)
+        }
         if CommandLine.arguments.contains("--dump") {
             SelfTest.run()
             exit(0)
@@ -41,17 +45,45 @@ struct ProcXRayApp: App {
     var body: some Scene {
         WindowGroup("ProcXRay") {
             ContentView()
-                .environmentObject(store)
+                .environment(store)
                 .frame(minWidth: 1100, minHeight: 650)
         }
         .defaultSize(width: 1500, height: 900)
         .commands {
+            InspectCommand()
             CommandGroup(after: .toolbar) {
                 Button("Refresh Now") { store.refresh() }.keyboardShortcut("r")
                 Button(store.paused ? "Resume Updates" : "Pause Updates") { store.paused.toggle() }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
+
+        WindowGroup("Process", id: ProcessWindow.id, for: ProcessRef.self) { $ref in
+            if let ref { ProcessWindow(ref: ref).environment(store) }
+        }
+        .defaultSize(width: 900, height: 640)
+        .commandsRemoved()   // no "New Process Window": these only open from a process row
+    }
+}
+
+/// View ▸ Inspect Process (⌘I), as in Activity Monitor; acts on the selected row of the focused window.
+struct InspectCommand: Commands {
+    @FocusedValue(\.inspectProcess) private var inspect
+    var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Button("Inspect Process") { inspect?() }
+                .keyboardShortcut("i")
+                .disabled(inspect == nil)
+            Divider()
+        }
+    }
+}
+
+struct InspectProcessKey: FocusedValueKey { typealias Value = () -> Void }
+extension FocusedValues {
+    var inspectProcess: (() -> Void)? {
+        get { self[InspectProcessKey.self] }
+        set { self[InspectProcessKey.self] = newValue }
     }
 }
 
@@ -74,7 +106,7 @@ enum Section: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     @State private var section: Section? = .processes
 
     var body: some View {
@@ -83,8 +115,8 @@ struct ContentView: View {
                 HStack {
                     Label(s.rawValue, systemImage: s.icon)
                     Spacer()
-                    if s == .ghosts, !store.ghosts.isEmpty {
-                        Text(verbatim: "\(store.ghosts.count)").font(.caption).padding(.horizontal, 6)
+                    if s == .ghosts, store.ghostCount > 0 {
+                        Text(verbatim: "\(store.ghostCount)").font(.caption).padding(.horizontal, 6)
                             .background(.orange.opacity(0.3), in: Capsule())
                     }
                 }.tag(s)
@@ -93,8 +125,7 @@ struct ContentView: View {
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 2) {
                     HelperBadge()
-                    Text(verbatim: "\(store.procs.count) processes")
-                    Text(verbatim: "snapshot \(store.refreshMillis) ms")
+                    RefreshStats()
                 }
                 .font(.caption).foregroundStyle(.secondary).padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -111,8 +142,17 @@ struct ContentView: View {
     }
 }
 
+/// Per-refresh numbers, in their own view so that only this text re-renders on every tick.
+struct RefreshStats: View {
+    @Environment(Store.self) var store
+    var body: some View {
+        Text(verbatim: "\(store.procs.count) processes")
+        Text(verbatim: "snapshot \(store.refreshMillis) ms")
+    }
+}
+
 struct HelperBadge: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {

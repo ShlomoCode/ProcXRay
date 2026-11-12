@@ -12,7 +12,7 @@ struct PanePlaceholder: View {
 // MARK: - Left Behind (processes whose responsible app has exited)
 
 struct GhostsView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     @State private var selection: pid_t?
 
     var body: some View {
@@ -67,7 +67,7 @@ struct GhostsView: View {
 // MARK: - LaunchServices
 
 struct AppsView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     @State private var selection: LSApp.ID?
     @State private var search = ""
     @State private var sort = [KeyPathComparator(\LSApp.index)]
@@ -111,7 +111,7 @@ struct AppsView: View {
 // MARK: - Background Task Management
 
 struct BackgroundItemsView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     @State private var selection: BTMItem.ID?
     @State private var search = ""
     @State private var onlyEnabled = false
@@ -185,7 +185,7 @@ struct BackgroundItemsView: View {
 // MARK: - launchd
 
 struct LaunchdView: View {
-    @EnvironmentObject var store: Store
+    @Environment(Store.self) var store
     @State private var selection: LaunchdJob.ID?
     @State private var search = ""
     @State private var runningOnly = true
