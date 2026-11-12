@@ -409,26 +409,28 @@ final class Store {
     /// `exited-with-subordinates` — survivors share its coalition. lsappinfo's `coalition:` is the
     /// *jetsam* coalition id, so match against both ids.
     nonisolated static func ghosts(procs: [pid_t: ProcInfo], lsApps: [LSApp]) -> [Ghost] {
-        var byDead: [pid_t: [ProcInfo]] = [:]
+        var survivors: [pid_t: [pid_t: ProcInfo]] = [:]   // dead pid -> survivors by pid
         for p in procs.values {
-            if let r = p.responsible, r != p.pid, procs[r] == nil { byDead[r, default: []].append(p) }
+            if let r = p.responsible, r != p.pid, procs[r] == nil { survivors[r, default: [:]][p.pid] = p }
         }
         let lsByPid = Dictionary(lsApps.compactMap { a in a.pid.map { ($0, a) } }, uniquingKeysWith: { a, _ in a })
-        var out = byDead.map { dead, ps in
+        // LaunchServices entries marked exited-with-subordinates: survivors are found by coalition, and are
+        // merged with any found through the responsible pid for the same dead app.
+        for a in lsApps where a.exited {
+            guard let pid = a.pid else { continue }
+            let listed = Set(a.coalitionPIDs + a.relatedCoalitionPIDs)
+            for p in procs.values where listed.contains(p.pid)
+                || (a.coalition != nil && (p.coalition == a.coalition || p.jetsamCoalition == a.coalition)) {
+                survivors[pid, default: [:]][p.pid] = p
+            }
+        }
+        // An exited app with nothing left running isn't "left behind".
+        return survivors.filter { !$0.value.isEmpty }.map { dead, ps in
             let ls = lsByPid[dead]
             return Ghost(deadPid: dead, name: ls?.name ?? "unknown (pid \(dead))", lsApp: ls,
-                         survivors: ps.sorted { $0.pid < $1.pid })
+                         survivors: ps.values.sorted { $0.pid < $1.pid })
         }
-        // LaunchServices entries marked exited-with-subordinates whose survivors we can find by coalition.
-        for a in lsApps where a.exited {
-            guard let pid = a.pid, byDead[pid] == nil else { continue }
-            let listed = Set(a.coalitionPIDs + a.relatedCoalitionPIDs)
-            let members = procs.values.filter { p in
-                listed.contains(p.pid) || (a.coalition != nil && (p.coalition == a.coalition || p.jetsamCoalition == a.coalition))
-            }
-            out.append(Ghost(deadPid: pid, name: a.name, lsApp: a, survivors: members.sorted { $0.pid < $1.pid }))
-        }
-        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
     func nodes(grouping: Grouping, filter: String, sort: [KeyPathComparator<ProcNode>]) -> [ProcNode] {
