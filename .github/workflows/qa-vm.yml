@@ -1,0 +1,81 @@
+name: QA VM
+
+# A disposable macOS desktop for interactive QA: builds upstream ProcXRay, installs agent-desktop,
+# joins the tailnet as an ephemeral node and stays up so an agent can SSH in and drive the GUI.
+# Public repo: dispatch-only (needs write access), no secrets in logs, third-party actions pinned.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Upstream yossizahn/ProcXRay ref to build
+        default: master
+      minutes:
+        description: Minutes to stay up (touch ~/qa-done to stop early)
+        default: "120"
+      runner:
+        description: macOS runner label
+        default: macos-latest
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-vm
+
+jobs:
+  vm:
+    if: github.repository == 'ShlomoCode/ProcXRay'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: yossizahn/ProcXRay
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Build ProcXRay (ad-hoc signed; the privileged helper needs a team identity)
+        run: |
+          ./build-app.sh
+          ditto build/ProcXRay.app /Applications/ProcXRay.app
+
+      - name: Install agent-desktop
+        run: brew install agent-desktop
+
+      - name: Grant Accessibility and Screen Recording to SSH sessions and agent-desktop
+        run: |
+          db="/Library/Application Support/com.apple.TCC/TCC.db"
+          ad="$(readlink -f "$(command -v agent-desktop)")"
+          now=$(date +%s)
+          for svc in kTCCServiceAccessibility kTCCServiceScreenCapture kTCCServicePostEvent; do
+            for client in "$ad" /bin/zsh /bin/bash /usr/libexec/sshd-keygen-wrapper; do
+              sudo sqlite3 "$db" "INSERT OR REPLACE INTO access VALUES('$svc','$client',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$now,NULL,NULL,'UNUSED',$now);"
+            done
+          done
+          sudo killall tccd 2>/dev/null || true
+          csrutil status
+
+      - name: Allow SSH with the QA key only
+        env:
+          PUBKEY: ${{ vars.QA_SSH_PUBKEY }}
+        run: |
+          test -n "$PUBKEY"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$PUBKEY" > ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys
+          sudo launchctl enable system/com.openssh.sshd
+          sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+
+      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: procxray-qa
+          log-mode: quiet
+
+      - name: Stay up for QA
+        env:
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          echo "ssh -i ~/.ssh/procxray-qa $(whoami)@procxray-qa"
+          end=$(( $(date +%s) + MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end" ] && [ ! -e ~/qa-done ]; do sleep 30; done
