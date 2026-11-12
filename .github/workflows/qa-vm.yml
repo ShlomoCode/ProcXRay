@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: qa-vm
+  group: qa-vm-${{ inputs.hostname }}
 
 jobs:
   vm:
