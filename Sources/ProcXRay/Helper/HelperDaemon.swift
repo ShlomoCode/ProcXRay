@@ -90,6 +90,8 @@ enum HelperDaemon {
             reply(try? JSONEncoder().encode(v))
         }
 
+        /// Runs off the connection's queue: messages on one connection are delivered one at a time, so a
+        /// 13 s sample run inline held up the app's metrics refresh and health probe behind it.
         func runTool(_ tool: Int, pid: Int32, reply: @escaping (String) -> Void) {
             guard let t = HelperTool(rawValue: tool), let (path, args) = t.argv(pid: pid) else {
                 reply("helper: rejected tool \(tool) pid \(pid)")
@@ -99,7 +101,9 @@ enum HelperDaemon {
                 reply("helper: only an admin user can inspect another user's processes or all background items")
                 return
             }
-            reply(Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput).annotated)
+            DispatchQueue.global(qos: .userInitiated).async {
+                reply(Shell.exec(path, args, timeout: t.timeout, maxBytes: HelperTool.maxOutput).annotated)
+            }
         }
     }
 }
