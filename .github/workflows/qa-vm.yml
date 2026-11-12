@@ -88,6 +88,6 @@ jobs:
           echo "ssh -i ~/.ssh/procxray-qa $(whoami)@procxray-qa"
           end=$(( $(date +%s) + MINUTES * 60 ))
           while [ "$(date +%s)" -lt "$end" ] && [ ! -e ~/qa-done ]; do
-            echo "$(date +%T) load=$(sysctl -n vm.loadavg) free=$(memory_pressure -Q 2>/dev/null | tail -1)"
+            echo "$(date +%T) load=$(sysctl -n vm.loadavg) free=$(memory_pressure -Q 2>/dev/null | tail -1) ts=$(tailscale status --json 2>/dev/null | jq -r '.BackendState + " online=" + (.Self.Online|tostring)')"
             sleep 60
           done
